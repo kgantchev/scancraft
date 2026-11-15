@@ -184,9 +184,14 @@ impl LmSystem {
             let w = row.w;
             let a = row.a;
             let c = w * (a[0] * a[0] + a[1] * a[1]);
-            if !c.is_finite() || c <= 0.0 {
+            if !c.is_finite() {
                 continue;
             }
+            // A row with no coordinate of its own (a sheet corner, whose place on the sheet is
+            // fixed) has nothing to eliminate: it adds ĴᵀWĴ and −ĴᵀWe to the shared unknowns
+            // as they are. Only the Schur correction needs c, so only it is left out. Skipping
+            // the whole row dropped all the corner evidence from the step.
+            let inverse = if c > 0.0 { 1.0 / c } else { 0.0 };
             let b = w * (a[0] * row.e[0] + a[1] * row.e[1]);
             // v = Ĵᵀ W a, for the shared columns this row touches.
             let mut v = Vec::with_capacity(row.columns.len());
@@ -196,11 +201,11 @@ impl LmSystem {
             for (p, &(column, dx, dy)) in row.columns.iter().enumerate() {
                 let cross = w * (dx * row.e[0] + dy * row.e[1]);
                 if let Some(slot) = rhs.get_mut(column) {
-                    *slot += -cross + v[p] * b / c;
+                    *slot += -cross + v[p] * b * inverse;
                 }
                 for (q, &(_, ex, ey)) in row.columns.iter().enumerate() {
                     let inner = w * (dx * ex + dy * ey);
-                    let outer = v[p] * v[q] / c;
+                    let outer = v[p] * v[q] * inverse;
                     let index = column * n + row.columns[q].0;
                     if let Some(slot) = matrix.get_mut(index) {
                         *slot += inner - outer;
@@ -227,7 +232,15 @@ impl LmSystem {
             let diagonal = matrix.get(i * self.shared + i).copied().unwrap_or(0.0);
             let index = i * self.shared + i;
             if let Some(slot) = matrix.get_mut(index) {
-                *slot += self.damping * diagonal.max(0.0);
+                if diagonal > 0.0 {
+                    *slot += self.damping * diagonal;
+                } else {
+                    // No row and no penalty touches this unknown (in the plane fit, the profile's
+                    // ten), so its whole row and column are zero and damping by μ·diagonal leaves
+                    // the matrix singular. A one on the diagonal sets its step to zero, which is
+                    // what no information means, and lets the others be solved.
+                    *slot += 1.0;
+                }
             }
         }
         let factor = Cholesky::factor(&matrix, self.shared)?;
@@ -331,6 +344,81 @@ pub fn require_finite(values: &[f64], what: &'static str) -> Result<(), GeomErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The minimiser of ½ Σ w |e + J δ + a s|² over the shared step δ and every row's own step s,
+    /// by a dense solve of the whole normal matrix with no elimination: the reference the Schur
+    /// complement of `LmSystem` must agree with. Rows without a coordinate of their own (a = 0)
+    /// have no s.
+    fn dense_shared_step(system: &LmSystem) -> Vec<f64> {
+        let n = system.shared;
+        let own_rows: Vec<usize> = system.rows.iter().enumerate().filter(|(_, r)| r.a != [0.0, 0.0]).map(|(i, _)| i).collect();
+        let size = n + own_rows.len();
+        let mut matrix = vec![0.0; size * size];
+        let mut rhs = vec![0.0; size];
+        for (index, row) in system.rows.iter().enumerate() {
+            let own_column = own_rows.iter().position(|&r| r == index).map(|k| n + k);
+            for component in 0..2 {
+                let mut gradient: Vec<(usize, f64)> = row.columns.iter().map(|&(c, dx, dy)| (c, if component == 0 { dx } else { dy })).collect();
+                if let Some(column) = own_column {
+                    gradient.push((column, row.a[component]));
+                }
+                for &(i, gi) in &gradient {
+                    rhs[i] -= row.w * gi * row.e[component];
+                    for &(j, gj) in &gradient {
+                        matrix[i * size + j] += row.w * gi * gj;
+                    }
+                }
+            }
+        }
+        let x = Cholesky::factor(&matrix, size).unwrap().solve(&rhs).unwrap();
+        x[..n].to_vec()
+    }
+
+    /// Eight rows on three shared unknowns: five with a coordinate of their own, and three
+    /// without (like a sheet corner, whose place on the sheet is fixed).
+    fn mixed_system(seed: u64, damping: f64) -> LmSystem {
+        let mut rng = scancraft_core::determinism::Xorshift64Star::new(seed);
+        let mut unit = move || 2.0 * rng.next_f64() - 1.0;
+        let mut rows = Vec::new();
+        for index in 0..8usize {
+            let columns = vec![(index % 3, unit(), unit()), ((index + 1) % 3, unit(), unit())];
+            let a = if index < 5 { [1.0 + unit() * 0.4, unit() * 0.4] } else { [0.0, 0.0] };
+            rows.push(LmRow { e: [unit(), unit()], w: 0.6 + 0.3 * unit().abs(), columns, a });
+        }
+        LmSystem { shared: 3, rows, extra: Vec::new(), damping }
+    }
+
+    #[test]
+    fn the_step_agrees_with_a_dense_solve_and_rows_without_an_own_coordinate_count() {
+        // The corner evidence of A27 has no coordinate of its own. It still pulls on the shared
+        // unknowns, and a step that leaves it out is a different step.
+        for seed in 1..=6 {
+            let system = mixed_system(seed, 0.0);
+            let step = system.step().expect("the system has information in every direction");
+            let dense = dense_shared_step(&system);
+            for (i, (got, want)) in step.iter().zip(&dense).enumerate() {
+                assert!((got - want).abs() < 1e-9, "seed {seed}, unknown {i}: {got} against {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_that_no_row_touches_gets_no_step_instead_of_failing_the_solve() {
+        // In A27's plane fit the ten profile unknowns have no rows and no penalty. Their
+        // diagonal is zero, which damping by μ·diagonal leaves at zero, and the solve used to fail
+        // on every iteration, so the plane was never fitted.
+        let rows = vec![
+            LmRow { e: [1.0, 0.5], w: 1.0, columns: vec![(0, 1.0, 0.0), (1, 0.0, 1.0)], a: [0.0, 0.0] },
+            LmRow { e: [-0.5, 2.0], w: 1.0, columns: vec![(0, 0.5, 0.2), (1, 0.1, 1.0)], a: [0.0, 0.0] },
+        ];
+        for damping in [0.0, 1e-3, 1.0] {
+            let system = LmSystem { shared: 4, rows: rows.clone(), extra: Vec::new(), damping };
+            let step = system.step().expect("a zero diagonal must not fail the solve");
+            assert_eq!(step[2], 0.0);
+            assert_eq!(step[3], 0.0);
+            assert!(step[0].abs() + step[1].abs() > 0.0);
+        }
+    }
 
     #[test]
     fn cholesky_solves_a_small_system() {

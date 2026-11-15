@@ -37,9 +37,10 @@ pub struct UndoStack {
 fn target(command: &Command) -> Option<(u8, u64)> {
     Some(match command {
         Command::CropSetCorner { page, .. } => (0, page.0),
-        Command::CropMoveSide { page, side, .. } => (1, page.0 * 4 + side.index() as u64),
-        Command::CropBendSide { page, side, .. } => (2, page.0 * 4 + side.index() as u64),
+        Command::CropMoveSide { page, side, .. } => (1, page.0.wrapping_mul(4).wrapping_add(side.index() as u64)),
+        Command::CropBendSide { page, side, .. } => (2, page.0.wrapping_mul(4).wrapping_add(side.index() as u64)),
         Command::CropSetSpine { photo, .. } => (3, photo.0),
+        Command::PageSetStrength { page, .. } => (4, page.0),
         _ => return None,
     })
 }
@@ -184,6 +185,25 @@ mod tests {
         s.record(step(corner(1, 0.0), 0, 0));
         s.record(step(corner(2, 0.0), 1, 10));
         s.record(step(corner(2, 1.0), 2, 10 + COALESCE_MS + 1));
+        assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn a_strength_slider_drag_counts_as_one_step() {
+        // Every tick of the slider is a command. Each used to be a step of its own, so one drag
+        // filled the 200-step stack and Undo took it back one tick at a time.
+        let strength = |page: u64, value: u8| Command::PageSetStrength { page: PageId(page), value };
+        let mut s = UndoStack::new();
+        for i in 0..50u8 {
+            s.record(step(strength(1, i), usize::from(i), u64::from(i) * 10));
+        }
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.undo().unwrap(), snapshot(0));
+        // Another page's slider, or a pause, starts a new step.
+        let mut s = UndoStack::new();
+        s.record(step(strength(1, 10), 0, 0));
+        s.record(step(strength(2, 10), 1, 10));
+        s.record(step(strength(2, 20), 2, 10 + COALESCE_MS + 1));
         assert_eq!(s.len(), 3);
     }
 

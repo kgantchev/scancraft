@@ -88,14 +88,20 @@ pub fn draw(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engi
     draw_sides(&painter, &loupe, &loupe_crop, centre_photo, crop, state);
 }
 
+/// Where a photo position falls in the crop's texture, as the 0–1 texture coordinates a mesh
+/// takes. The crop's own pixel position is divided by the crop's size: used as pixels, the
+/// coordinates all lay far outside the texture, and the loupe showed one clamped colour.
+fn crop_uv(crop: &LoupeCrop, photo: Point) -> Pos2 {
+    let cx = (photo.x - crop.origin.x) / crop.scale;
+    let cy = (photo.y - crop.origin.y) / crop.scale;
+    let (w, h) = (f64::from(crop.image.width().max(1)), f64::from(crop.image.height().max(1)));
+    Pos2::new((cx / w) as f32, (cy / h) as f32)
+}
+
 /// Draws the loupe's circle: the crop's pixels, magnified, in a fan of 64 triangles.
 fn draw_circle(painter: &Painter, loupe: &Loupe, crop: &LoupeCrop, centre_photo: Point, texture: egui::TextureId) {
     let mut mesh = Mesh::with_texture(texture);
-    let uv_of = |photo: Point| {
-        let cx = (photo.x - crop.origin.x) / crop.scale;
-        let cy = (photo.y - crop.origin.y) / crop.scale;
-        Pos2::new(cx as f32, cy as f32)
-    };
+    let uv_of = |photo: Point| crop_uv(crop, photo);
     mesh.vertices.push(egui::epaint::Vertex { pos: loupe.centre, uv: uv_of(centre_photo), color: Color32::WHITE });
     for i in 0..=SEGMENTS {
         let angle = std::f32::consts::TAU * i as f32 / SEGMENTS as f32;
@@ -187,4 +193,23 @@ fn loupe_point(loupe: &Loupe, centre_photo: Point, photo: Point) -> Pos2 {
 /// Whether a side is drawn dashed: the spine of a spread (§4.3).
 pub fn is_spine(outline: &OutlineView, side: Side) -> bool {
     matches!(outline.sides[side.index()], SideShape::Spine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crop_uv;
+    use scancraft_core::engine_api::LoupeCrop;
+    use scancraft_core::geom::Point;
+    use scancraft_core::image::Plane;
+    use std::sync::Arc;
+
+    #[test]
+    fn photo_positions_map_to_zero_to_one_texture_coordinates() {
+        // A 200 × 100 crop whose top-left pixel is photo (10, 20), two photo pixels to a crop pixel.
+        let crop = LoupeCrop { image: Arc::new(Plane::new(200, 100, [0u8; 3]).unwrap()), origin: Point::new(10.0, 20.0), scale: 2.0 };
+        let at = |x: f64, y: f64| crop_uv(&crop, Point::new(x, y));
+        assert_eq!(at(10.0, 20.0), egui::pos2(0.0, 0.0));
+        assert_eq!(at(210.0, 120.0), egui::pos2(0.5, 0.5));
+        assert_eq!(at(410.0, 220.0), egui::pos2(1.0, 1.0));
+    }
 }

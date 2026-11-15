@@ -149,7 +149,13 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
         platforms: Platforms::ALL,
     });
     page_items.push(Node::Item(Item::new(CommandRef::new("crop.straighten_side"), "Straighten Side")));
-    page_items.push(Node::Item(item(CommandRef::new("crop.book"), "Book Spreads", "Cmd+Alt+B")));
+    // The item turns the setting over, so it carries the state it is going to: without the
+    // parameter `command_of` found no command, and the item and its shortcut did nothing.
+    page_items.push(Node::Item(item(
+        CommandRef::with_params("crop.book", serde_json::json!({ "on": !view.book_spreads })),
+        "Book Spreads",
+        "Cmd+Alt+B",
+    )));
     page_items.push(Node::Item(item(photo_command("crop.apply", photo), "Correct Perspective", "↩")));
     page_items.push(Node::Item(item(page_command("page.edit", enhance_page.or(page), serde_json::Value::Null), "Back to Crop", "Cmd+[")));
     page_items.push(Node::Item(item(
