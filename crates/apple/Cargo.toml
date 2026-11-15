@@ -44,3 +44,6 @@ objc2-vision = { workspace = true, features = ["objc2-core-foundation"] }
 [dev-dependencies]
 # Reads the recorded Vision results the parsing tests start from.
 serde_json = { workspace = true }
+# The reference page of specification §10.1, which A15's and A20's tests are written against.
+# A dev-dependency only: `cargo xtask layers` lets a layer crate use the generator in its tests.
+scancraft-synth = { workspace = true }

@@ -3999,6 +3999,7 @@ dependencies = [
  "objc2-vision",
  "scancraft-core",
  "scancraft-raster",
+ "scancraft-synth",
  "serde_json",
  "thiserror 2.0.21",
  "unicode-segmentation",
