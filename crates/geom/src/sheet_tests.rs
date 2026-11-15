@@ -200,22 +200,22 @@ fn run_scenes(mode: BendMode, depth: f64, true_f: f64, fit_f: f64, fit_focal: bo
 }
 
 #[test]
-fn book_pages_are_flattened_within_a_quarter_of_a_percent() {
+fn book_pages_are_flattened_within_the_specifications_bound() {
     let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, Spoil::default());
-    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0015, "{errors:?}");
 }
 
 #[test]
 fn a_letter_folded_in_three_is_found_bending_down() {
     let (errors, _) = run_scenes(BendMode::Down, 0.07, 0.75, 0.75, false, Spoil::default());
-    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0015, "{errors:?}");
 }
 
 #[test]
 fn fitting_the_focal_length_recovers_from_a_wrong_start() {
     // The photo has no EXIF: the start is the typical 0.75, the truth is 0.6.
     let (errors, fits) = run_scenes(BendMode::Across, 0.14, 0.6, 0.75, true, Spoil::default());
-    assert!(median(errors.clone()) < 0.0030, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0015, "median {} {errors:?}", median(errors.clone()));
     assert!(
         fits.iter().all(|s| s.focal_source == FocalSource::Fitted && (s.focal - 0.6).abs() < 0.12),
         "{:?}",
@@ -226,14 +226,15 @@ fn fitting_the_focal_length_recovers_from_a_wrong_start() {
 #[test]
 fn spoiled_evidence_still_flattens() {
     // A27's tests: 15% of text points wrong, words shifted 3 px within their lines, half of one
-    // side hidden. The spec's bound is a median under 0.15% over 40 scenes per case, which WP12
-    // checks on the synthetic sets. Eight scenes are enough here to catch a broken fit, but their
-    // median moves by ±0.05% with the noise drawn, so the bound is looser.
+    // side hidden. The bound is the spec's, a median under 0.15%. It is measured here on eight
+    // scenes a case, and the specification's 40 are WP12's to check on the synthetic sets. The
+    // bound was 0.25% until a review found the solver leaving the corner evidence out of its
+    // steps (which cost about 0.03% on every case); at 0.25% that went unseen.
     let cases =
         [Spoil { outliers: 0.15, ..Spoil::default() }, Spoil { shift: 3.0, ..Spoil::default() }, Spoil { half_side: true, ..Spoil::default() }];
     for spoil in cases {
         let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, spoil);
-        assert!(median(errors.clone()) < 0.0025, "{errors:?}");
+        assert!(median(errors.clone()) < 0.0015, "{errors:?}");
     }
 }
 
@@ -242,7 +243,7 @@ fn a_page_without_text_still_flattens_from_its_outline() {
     // Outline and corners only: coarser than with text, but still far under what the corners
     // alone give (about 1.4% on a book page).
     let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, Spoil { no_text: true, ..Spoil::default() });
-    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0015, "{errors:?}");
 }
 
 #[test]

@@ -94,8 +94,8 @@ impl Session {
         let mut repairs = Vec::new();
         file.format = SESSION_FORMAT;
         repair(&mut file, &mut pending, &mut repairs);
-        let next_photo = file.photos.iter().map(|p| p.id.0).max().unwrap_or(0) + 1;
-        let next_page = file.pages.iter().chain(&pending).map(|p| p.id.0).max().unwrap_or(0) + 1;
+        let next_photo = file.photos.iter().map(|p| p.id.0).max().unwrap_or(0).saturating_add(1);
+        let next_page = file.pages.iter().chain(&pending).map(|p| p.id.0).max().unwrap_or(0).saturating_add(1);
         Ok(Session { dir, file, pending, next_photo, next_page, repairs })
     }
 
@@ -149,20 +149,21 @@ impl Session {
 
     pub fn allocate_photo_id(&mut self) -> PhotoId {
         let id = PhotoId(self.next_photo);
-        self.next_photo += 1;
+        // A file with an id at the end of the range is hostile; the counter stops there.
+        self.next_photo = self.next_photo.saturating_add(1);
         id
     }
 
     pub fn allocate_page_id(&mut self) -> PageId {
         let id = PageId(self.next_page);
-        self.next_page += 1;
+        self.next_page = self.next_page.saturating_add(1);
         id
     }
 
     /// Makes sure later ids stay above every id now in the session (after undo restores a snapshot).
     pub fn resync_ids(&mut self) {
-        let photo = self.file.photos.iter().map(|p| p.id.0).max().unwrap_or(0) + 1;
-        let page = self.file.pages.iter().chain(&self.pending).map(|p| p.id.0).max().unwrap_or(0) + 1;
+        let photo = self.file.photos.iter().map(|p| p.id.0).max().unwrap_or(0).saturating_add(1);
+        let page = self.file.pages.iter().chain(&self.pending).map(|p| p.id.0).max().unwrap_or(0).saturating_add(1);
         self.next_photo = self.next_photo.max(photo);
         self.next_page = self.next_page.max(page);
     }
@@ -347,6 +348,25 @@ mod tests {
             size: (100, 80),
             focal: Default::default(),
         }
+    }
+
+    #[test]
+    fn ids_at_the_top_of_the_range_in_a_hostile_file_never_panic() {
+        // A session file is input: a page or photo with the largest id there is must not make the
+        // next id overflow, which panicked in a debug build and wrapped to an id already in use in
+        // a release build.
+        let dir = temp("hostile-ids");
+        let mut s = Session::create(&dir).unwrap();
+        s.file_mut().photos.push(photo(u64::MAX));
+        s.file_mut().pages.push(page(u64::MAX, u64::MAX));
+        s.save().unwrap();
+        let mut back = Session::open(&dir).unwrap();
+        back.resync_ids();
+        let (a, b) = (back.allocate_page_id(), back.allocate_page_id());
+        let (c, d) = (back.allocate_photo_id(), back.allocate_photo_id());
+        // The ids can't go on past the end; none of this may panic, and they stay in the range.
+        assert!(a.0 >= u64::MAX - 1 && b.0 >= u64::MAX - 1 && c.0 >= u64::MAX - 1 && d.0 >= u64::MAX - 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod edges;
 pub mod lines;
 pub mod refine;
 pub mod select;
+pub mod shapes;
 pub mod spread;
 pub mod text_lines;
 

@@ -39,8 +39,10 @@ pub fn jaccard(found: &Quad, truth: &Quad) -> Result<f64, CoreError> {
     Ok(if union > 0.0 { (intersection / union).clamp(0.0, 1.0) } else { 0.0 })
 }
 
-/// The largest corner distance as a fraction of the photo's diagonal. Both quads are in the
-/// canonical order TL, TR, BR, BL, and corners are paired by index.
+/// The largest corner distance as a fraction of the photo's diagonal. Corners are paired by
+/// index, after both quads are put in the canonical order TL, TR, BR, BL of §7.2: the generator's
+/// truth starts at the page's own top left, which a rolled camera can put at any corner of the
+/// photo, and a quad that starts elsewhere is the same page.
 pub fn corner_error(found: &Quad, truth: &Quad, photo: (u32, u32)) -> Result<f64, CoreError> {
     if !found.is_finite() || !truth.is_finite() {
         return Err(scene_error("a quadrilateral has corners that are not finite"));
@@ -48,6 +50,7 @@ pub fn corner_error(found: &Quad, truth: &Quad, photo: (u32, u32)) -> Result<f64
     if photo.0 == 0 || photo.1 == 0 {
         return Err(scene_error("the photo has no pixels"));
     }
+    let (found, truth) = (Quad::canonical(found.0), Quad::canonical(truth.0));
     let worst = found.0.iter().zip(&truth.0).map(|(a, b)| distance(*a, *b)).fold(0.0, f64::max);
     Ok(worst / f64::from(photo.0).hypot(f64::from(photo.1)))
 }
@@ -283,6 +286,26 @@ mod tests {
         assert_eq!(corner_error(&truth, &truth, (100, 100)).unwrap(), 0.0);
         assert!(corner_error(&truth, &truth, (0, 100)).is_err());
         assert!(corner_error(&quad([(f64::INFINITY, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]), &truth, (10, 10)).is_err());
+    }
+
+    #[test]
+    fn the_corner_error_does_not_depend_on_which_corner_a_quad_starts_at() {
+        // The generator gives the page's own corners, TL first, and its camera rolls by any angle,
+        // so the page's top left can be anywhere in the photo. A detector's corners are canonical
+        // (§7.2). The same page in a different starting corner is the same page: with the corners
+        // paired by index it scored errors of 30–70% of the diagonal on a perfect find.
+        let truth = square(10.0, 10.0, 80.0);
+        for shift in 0..4 {
+            let rolled = Quad([0, 1, 2, 3].map(|i| truth.0[(i + shift) % 4]));
+            assert_eq!(corner_error(&truth, &rolled, (100, 100)).unwrap(), 0.0, "found canonical, truth starting at corner {shift}");
+            assert_eq!(corner_error(&rolled, &truth, (100, 100)).unwrap(), 0.0, "found starting at corner {shift}, truth canonical");
+        }
+        // A corner that is really off still counts, whatever order the quads came in.
+        let mut found = truth;
+        found.0[2] = Point::new(found.0[2].x + 6.0, found.0[2].y + 8.0);
+        let rolled = Quad([0, 1, 2, 3].map(|i| truth.0[(i + 1) % 4]));
+        let e = corner_error(&found, &rolled, (100, 100)).unwrap();
+        assert!((e - 10.0 / 20000f64.sqrt()).abs() < 1e-12, "{e}");
     }
 
     #[test]

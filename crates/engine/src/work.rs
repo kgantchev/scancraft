@@ -327,7 +327,16 @@ impl Engine {
         let meta = done.meta;
         let output = match done.outcome {
             Ok(output) => output,
-            Err(EngineError::Cancelled) => return false,
+            Err(EngineError::Cancelled) => {
+                // Cancelling a job is not news, with one exception. An export is cancelled when
+                // an undo restores a snapshot, and it must not stay marked as running: that
+                // refused every later export. The screen is left as the restore set it.
+                if meta.tag == tag_of(&["export"]) && self.exporting.take().is_some() {
+                    self.notify("The PDF wasn't written, because the pages changed while it was being made.", false);
+                    return true;
+                }
+                return false;
+            }
             Err(e) => return self.job_failed(meta, e),
         };
         match output {
@@ -581,6 +590,22 @@ mod tests {
         let done = JobDone { meta: JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() }, outcome: Err(EngineError::msg("the disk is full")) };
         assert!(engine.apply_done(done));
         assert!(engine.pending_notices.iter().any(|n| n.error && n.text.contains("the disk is full")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cancelled_export_lets_the_next_export_start() {
+        // Undo restores a snapshot and cancels every job, the export's included. The export's
+        // flag used to stay set, so every later export failed with "already being made".
+        let (mut engine, dir) = engine("export-cancelled");
+        engine.exporting = Some(Screen::Export);
+        engine.screen = Screen::Import;
+        let done = JobDone { meta: JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() }, outcome: Err(EngineError::Cancelled) };
+        assert!(engine.apply_done(done));
+        assert!(engine.exporting.is_none(), "the flag for an export in progress is still set");
+        // The screen is the one the undo restored, not the one the export came from.
+        assert_eq!(engine.screen, Screen::Import);
+        assert!(engine.pending_notices.iter().any(|n| n.text.contains("PDF")), "{:?}", engine.pending_notices);
         let _ = std::fs::remove_dir_all(dir);
     }
 

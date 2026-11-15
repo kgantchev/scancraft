@@ -400,6 +400,20 @@ fn the_menu_bar_has_the_items_of_the_specification() {
     assert_eq!(shortcut_of("Show Page Tray").as_deref(), Some("⌥⌘T"));
 }
 
+#[test]
+fn the_book_spreads_menu_item_sends_the_opposite_of_the_current_setting() {
+    // The item used to carry no parameter, so `command_of` found no command and the menu item
+    // (and its shortcut) did nothing at all.
+    for current in [false, true] {
+        let mut view = crop_view();
+        view.book_spreads = current;
+        let bar = scancraft_ui_egui::build_menu_bar(&view);
+        let item = bar.items().into_iter().find(|item| item.label == "Book Spreads").expect("the Book Spreads item");
+        let command = scancraft_ui_egui::menu::command_of(&item.command);
+        assert_eq!(command, Some(Command::CropBook { on: !current }), "with book spreads {current}");
+    }
+}
+
 // -------------------------------------------------------------- the commands
 
 #[test]
