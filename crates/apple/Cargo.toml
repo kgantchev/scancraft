@@ -25,8 +25,25 @@ scancraft-core = { workspace = true }
 scancraft-raster = { workspace = true }
 unicode-segmentation = { workspace = true }
 thiserror = { workspace = true }
+# PNG encoding for the Vision hand-off (A8 step 1, A20 step 1): the work image goes to
+# Vision as PNG bytes in an NSData. `image` is declared in the workspace manifest with its
+# png feature; this is a declared dependency, not a new one (build plan §2 rule 3).
+image = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-foundation = { workspace = true }
-objc2-vision = { workspace = true }
+# `NSProcessInfo` adds one feature to the workspace's objc2-foundation entry, for the macOS
+# version stored with the recognised text (A20 step 5). It is not a new dependency.
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
+# `objc2-core-foundation` is objc2-vision's own feature for the calls that return a `CGPoint` or
+# `CGRect`: the four corners of a rectangle observation and an observation's bounding box. Without
+# it A8 and A20 cannot read a position. The crate is already in the lockfile through other
+# dependencies, and this manifest never names it.
+objc2-vision = { workspace = true, features = ["objc2-core-foundation"] }
+
+[dev-dependencies]
+# Reads the recorded Vision results the parsing tests start from.
+serde_json = { workspace = true }
+# The reference page of specification §10.1, which A15's and A20's tests are written against.
+# A dev-dependency only: `cargo xtask layers` lets a layer crate use the generator in its tests.
+scancraft-synth = { workspace = true }
