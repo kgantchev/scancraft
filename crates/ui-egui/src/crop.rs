@@ -1,0 +1,317 @@
+//! Screen 2, Boundary Detection and Cropping (§4.3): the toolbar, the canvas, the handles and the
+//! keyboard model.
+
+use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Ui, Vec2};
+
+use scancraft_core::command::{Command, Corner};
+use scancraft_core::engine_api::{CropView, EngineApi, ViewState};
+use scancraft_core::geom::{Point, Side};
+use scancraft_core::recipe::{Detector, FlattenMode, FlattenReason};
+
+use crate::canvas::{self, Canvas};
+use crate::state::{Selection, UiState};
+use crate::theme;
+
+/// One photo pixel, the step of an arrow key (§4.3).
+pub const STEP: f64 = 1.0;
+/// The step with Shift held (§4.3).
+pub const STEP_SHIFT: f64 = 10.0;
+/// The step with Option held (§4.3).
+pub const STEP_OPTION: f64 = 0.25;
+
+/// Draws Screen 2.
+pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+    let Some(crop) = view.crop.as_ref() else {
+        return;
+    };
+    crop_toolbar(ui, state, view, engine);
+    let area = ui.available_rect_before_wrap();
+    let (rect, _) = ui.allocate_exact_size(area.size(), Sense::hover());
+    let display = engine.image(scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo));
+    let Some(display) = display else {
+        return;
+    };
+    let canvas = Canvas::new(rect, &display, crop.photo_size);
+    canvas::draw_canvas(ui, &canvas, crop, state, engine);
+    for outline in &crop.outlines {
+        let painter = ui.painter_at(canvas.rect);
+        canvas::draw_outline(&painter, &canvas, outline);
+    }
+    for outline in &crop.outlines {
+        canvas::draw_handles(ui, &canvas, outline, state, engine);
+    }
+    canvas::draw_spine(ui, &canvas, crop, state, engine);
+    if crop.not_found {
+        not_found_hint(ui, state, canvas.rect);
+    }
+    if crop.suggest_split {
+        split_button(ui, state, crop, engine, canvas.rect);
+    }
+    keyboard(ui, state, crop, &canvas, engine);
+    // The loupe floats above everything, including the tray (§4.3).
+    crate::loupe::draw(ui, &canvas, crop, state, engine);
+}
+
+/// The toolbar above the canvas (§4.3).
+pub fn crop_toolbar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+    let Some(crop) = view.crop.as_ref() else {
+        return;
+    };
+    let Some(outline) = crop.outlines.first().cloned() else {
+        return;
+    };
+    let photo = crop.photo;
+    ui.horizontal_wrapped(|ui| {
+        // Auto-Detect.
+        let mut auto = crop.auto_detect;
+        let label = state.text.t("Auto-Detect");
+        let response = ui.checkbox(&mut auto, label).on_hover_text(auto_detect_tooltip(&outline.corners_from));
+        if response.clicked() && !crop.auto_detect {
+            canvas::dispatch(state, engine, Command::CropAuto { page: outline.page });
+        }
+        // Flatten: Auto, On and Off.
+        let flatten_label = state.text.t("Flatten");
+        ui.label(flatten_label).on_hover_text(flatten_tooltip(&outline));
+        let mut mode = outline.flatten;
+        for (option, name) in [(FlattenMode::Auto, "Auto"), (FlattenMode::On, "On"), (FlattenMode::Off, "Off")] {
+            let name = state.text.t(name);
+            if ui.radio_value(&mut mode, option, name).changed() && mode != outline.flatten {
+                canvas::dispatch(state, engine, Command::CropSetFlatten { page: outline.page, mode });
+            }
+        }
+        // Use Full Image.
+        let full = state.text.t("Use Full Image");
+        if ui.button(full).clicked() {
+            canvas::dispatch(state, engine, Command::CropFullImage { page: outline.page });
+        }
+        // Correct Perspective.
+        let apply = state.text.t("Correct Perspective");
+        let mut button = ui.add_enabled(outline.invalid.is_none(), egui::Button::new(apply));
+        if let Some(reason) = &outline.invalid {
+            button = button.on_hover_text(reason.clone());
+        }
+        if button.clicked() {
+            canvas::dispatch(state, engine, Command::CropApply { photo });
+        }
+        // Discard Photo.
+        let discard = state.text.t("Discard Photo");
+        if ui.button(discard).clicked() {
+            canvas::dispatch(state, engine, Command::ImportDiscard { item: photo });
+        }
+        // The batch's position.
+        let position = state.text.t(&format!("Photo {} of {}", crop.position.0, crop.position.1));
+        ui.label(position);
+        let previous = state.text.t("Previous Photo");
+        let next = state.text.t("Next Photo");
+        if theme::arrow_button(ui, &previous, theme::Arrow::Left).on_hover_text(previous.clone()).clicked() {
+            state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
+        }
+        if theme::arrow_button(ui, &next, theme::Arrow::Right).on_hover_text(next.clone()).clicked() {
+            state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
+        }
+        // Book Spreads.
+        let mut spreads = view.book_spreads;
+        let label = state.text.t("Book Spreads");
+        if ui.checkbox(&mut spreads, label).changed() {
+            canvas::dispatch(state, engine, Command::CropBook { on: spreads });
+        }
+    });
+}
+
+/// The Auto-Detect tooltip names the source of the corners (§4.3).
+pub fn auto_detect_tooltip(origin: &scancraft_core::recipe::CornerOrigin) -> String {
+    match origin {
+        scancraft_core::recipe::CornerOrigin::Detected { by, .. } => match by {
+            Detector::Apple => "Detected by Apple".to_owned(),
+            Detector::Contours => "Detected by contours".to_owned(),
+            Detector::Lines => "Detected by lines".to_owned(),
+        },
+        scancraft_core::recipe::CornerOrigin::NotFound => "Not found".to_owned(),
+        scancraft_core::recipe::CornerOrigin::Manual => "Adjusted by hand".to_owned(),
+        scancraft_core::recipe::CornerOrigin::FullImage => "The whole photo".to_owned(),
+    }
+}
+
+/// The Flatten tooltip gives the outcome and its reason (§4.3).
+pub fn flatten_tooltip(outline: &scancraft_core::engine_api::OutlineView) -> String {
+    let Some(decision) = &outline.flatten_decision else {
+        return match outline.flatten {
+            FlattenMode::Auto => "Auto: the page is flattened when the checks pass".to_owned(),
+            FlattenMode::On => "On: the page is always flattened".to_owned(),
+            FlattenMode::Off => "Off: the page is flattened by its four corners".to_owned(),
+        };
+    };
+    match decision.reason {
+        FlattenReason::Off => "Left flat: flattening is off".to_owned(),
+        FlattenReason::On => "Flattened: the page is flattened".to_owned(),
+        FlattenReason::OnButNoFit => "Couldn't flatten the curve: no lines of text or curved edges to follow.".to_owned(),
+        FlattenReason::NoEvidence | FlattenReason::NoBend => "Left flat: no bend found".to_owned(),
+        FlattenReason::NoGain => "Left flat: flattening gained nothing over the flat page".to_owned(),
+        FlattenReason::NotStraighter => "Left flat: the lines were not straighter".to_owned(),
+        FlattenReason::Straighter => {
+            let before = decision.straightness_corners.unwrap_or_default();
+            let after = decision.straightness_flat.unwrap_or_default();
+            let gain = if before > 0.0 { (after - before) / before * 100.0 } else { 0.0 };
+            format!("Flattened: text lines {} % straighter", gain.round() as i64)
+        }
+        FlattenReason::Unavailable => "Unavailable: a full-image or PDF page cannot be flattened".to_owned(),
+    }
+}
+
+/// The hint shown when the detection found nothing (§4.3).
+pub fn not_found_hint(ui: &mut Ui, state: &UiState, rect: Rect) {
+    let text = state.text.t("Couldn't find the page edges. Drag the corners onto the page.");
+    // A label over the canvas, so a screen reader reads it too.
+    let width = 460.0;
+    let strip = Rect::from_min_size(Pos2::new(rect.center().x - width / 2.0, rect.min.y + 16.0), Vec2::new(width, 40.0));
+    ui.put(strip, egui::Label::new(egui::RichText::new(text).color(Color32::WHITE)).halign(egui::Align::Center));
+}
+
+/// The "Two pages? Split" button in the canvas's corner (§4.3).
+fn split_button(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &mut dyn EngineApi, canvas: Rect) {
+    let rect = Rect::from_min_size(Pos2::new(canvas.right() - 150.0, canvas.top() + 16.0), Vec2::new(134.0, 30.0));
+    let label = state.text.t("Two pages? Split");
+    let response = ui.interact(rect, ui.make_persistent_id("scancraft.split"), Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, theme::COPPER);
+    painter.text(rect.center(), Align2::CENTER_CENTER, label.clone(), FontId::proportional(14.0), Color32::WHITE);
+    if response.clicked() {
+        canvas::dispatch(state, engine, Command::CropSplit { photo: crop.photo, on: true });
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
+}
+
+/// The items Tab walks through: the four corners, then the bend handles side by side, then the
+/// spine's two ends (§4.3).
+pub fn selectable_items(crop: &CropView) -> Vec<Selection> {
+    let mut items = Vec::new();
+    let Some(outline) = crop.outlines.first() else { return items };
+    for corner in [Corner::TopLeft, Corner::TopRight, Corner::BottomRight, Corner::BottomLeft] {
+        items.push(Selection::Corner { page: outline.page, corner });
+    }
+    for side in Side::ALL {
+        if !canvas::side_is_curved(outline, side) {
+            continue;
+        }
+        for index in 0..canvas::bend_handles(outline, side).len().min(3) {
+            items.push(Selection::Bend { page: outline.page, side, index });
+        }
+    }
+    if crop.spine.is_some() {
+        items.push(Selection::Spine { photo: crop.photo, end: 0 });
+        items.push(Selection::Spine { photo: crop.photo, end: 1 });
+    }
+    items
+}
+
+/// The command an arrow key runs: the selected corner, bend handle or spine end moves by the
+/// step (§4.3).
+pub fn move_selection(crop: &CropView, selection: &Selection, dx: f64, dy: f64) -> Option<Command> {
+    match *selection {
+        Selection::Corner { page, corner } => {
+            let outline = crop.outlines.iter().find(|o| o.page == page)?;
+            let point = crate::state::corner_point(&outline.corners, corner);
+            Some(Command::CropSetCorner { page, corner, x: point.x + dx, y: point.y + dy })
+        }
+        Selection::Bend { page, side, index } => {
+            let outline = crop.outlines.iter().find(|o| o.page == page)?;
+            let mut handles = canvas::bend_handles(outline, side);
+            if handles.len() < 3 || index >= 3 {
+                return None;
+            }
+            let handle = handles[index];
+            handles[index] = Point::new(handle.x + dx, handle.y + dy);
+            Some(Command::CropBendSide { page, side, handles: [handles[0], handles[1], handles[2]] })
+        }
+        Selection::Spine { photo, end } => {
+            let spine = crop.spine?;
+            let (mut top, mut bottom) = (spine[0], spine[1]);
+            if end == 0 {
+                top = Point::new(top.x + dx, top.y + dy);
+            } else {
+                bottom = Point::new(bottom.x + dx, bottom.y + dy);
+            }
+            Some(Command::CropSetSpine { photo, top, bottom })
+        }
+    }
+}
+
+/// The keyboard model of Screen 2 (§4.3).
+fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, canvas: &Canvas, engine: &mut dyn EngineApi) {
+    let now = ui.input(|i| i.time);
+    let items = selectable_items(crop);
+    let (tab, shift, escape) = ui.input(|i| (i.key_pressed(Key::Tab), i.modifiers.shift, i.key_pressed(Key::Escape)));
+    if escape {
+        state.selection = None;
+    }
+    if tab && !items.is_empty() {
+        let next = match state.selection {
+            None => {
+                if shift {
+                    items.len() - 1
+                } else {
+                    0
+                }
+            }
+            Some(current) => {
+                let index = items.iter().position(|item| *item == current).unwrap_or(0);
+                let len = items.len();
+                if shift { (index + len - 1) % len } else { (index + 1) % len }
+            }
+        };
+        state.selection = items.get(next).copied();
+    }
+    let step = ui.input(|i| {
+        if i.modifiers.shift {
+            STEP_SHIFT
+        } else if i.modifiers.alt {
+            STEP_OPTION
+        } else {
+            STEP
+        }
+    });
+    let (left, right, up, down) =
+        ui.input(|i| (i.key_pressed(Key::ArrowLeft), i.key_pressed(Key::ArrowRight), i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown)));
+    let (dx, dy) = match (left, right, up, down) {
+        (true, _, _, _) => (-step, 0.0),
+        (_, true, _, _) => (step, 0.0),
+        (_, _, true, _) => (0.0, -step),
+        (_, _, _, true) => (0.0, step),
+        _ => (0.0, 0.0),
+    };
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let Some(selection) = state.selection else { return };
+    let Some(command) = move_selection(crop, &selection, dx, dy) else { return };
+    canvas::dispatch(state, engine, command);
+    // The loupe shows the corner that moved (§4.3).
+    if let Some(position) = selection_position(crop, canvas, &selection) {
+        state.show_loupe(now, position);
+    }
+}
+
+/// Where a selection is on the screen, for the loupe after a keyboard nudge.
+fn selection_position(crop: &CropView, canvas: &Canvas, selection: &Selection) -> Option<Pos2> {
+    match *selection {
+        Selection::Corner { page, corner } => {
+            let outline = crop.outlines.iter().find(|o| o.page == page)?;
+            let point = crate::state::corner_point(&outline.corners, corner);
+            Some(canvas.photo_to_canvas(point))
+        }
+        Selection::Bend { page, side, index } => {
+            let outline = crop.outlines.iter().find(|o| o.page == page)?;
+            let handles = canvas::bend_handles(outline, side);
+            let point = handles.get(index)?;
+            Some(canvas.photo_to_canvas(*point))
+        }
+        Selection::Spine { photo, end } => {
+            if crop.photo != photo {
+                return None;
+            }
+            let spine = crop.spine?;
+            let point = spine.get(end)?;
+            Some(canvas.photo_to_canvas(*point))
+        }
+    }
+}

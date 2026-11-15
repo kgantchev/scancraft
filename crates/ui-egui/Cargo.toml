@@ -19,6 +19,10 @@ craft-dialogs = { workspace = true }
 craft-keymap = { workspace = true }
 craft-quit = { workspace = true }
 craft-i18n = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-egui_kittest = { workspace = true }
+egui_kittest = { workspace = true, features = ["snapshot", "wgpu"] }
+egui = { workspace = true, features = ["default_fonts"] }
+craft-keymap = { workspace = true }
