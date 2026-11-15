@@ -5,3 +5,5 @@
 /.claude/
 plan/
 /synth-out/
+/fixtures/reference/*
+!/fixtures/reference/README.md
