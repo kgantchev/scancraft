@@ -950,9 +950,7 @@ fn an_edge_handle_drag_sends_crop_move_side_with_the_outward_offset() {
 fn a_bend_handle_drag_sends_crop_bend_side_with_all_three_handles() {
     let mut view = crop_view();
     let mut outline = outline();
-    outline.sides[Side::Top.index()] = SideShape::Bent {
-        handles: [Point::new(400.0, 70.0), Point::new(600.0, 60.0), Point::new(800.0, 55.0)],
-    };
+    outline.sides[Side::Top.index()] = SideShape::Bent { handles: [Point::new(400.0, 70.0), Point::new(600.0, 60.0), Point::new(800.0, 55.0)] };
     view.crop.as_mut().expect("the crop view").outlines = vec![outline];
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
