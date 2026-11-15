@@ -187,7 +187,7 @@ impl Engine {
         let threads = if options.threads == 0 { std::thread::available_parallelism().map_or(2, |n| n.get()) } else { options.threads };
         let root = options
             .sessions_root
-            .or_else(|| settings.get().sessions_dir.as_ref().map(PathBuf::from))
+            .or_else(|| settings.get().sessions_dir.as_deref().map(crate::settings::path_from_setting))
             .or_else(|| session.dir().parent().map(PathBuf::from))
             .unwrap_or_else(|| session.dir().to_path_buf());
         let cache = Arc::new(Cache::new(session.cache_dir()).unwrap_or_else(|_| Cache::unchecked(session.cache_dir())));

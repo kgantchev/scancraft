@@ -73,6 +73,24 @@ pub fn default_sessions_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("ScanCraft").join("Sessions")
 }
 
+/// The path a settings string names, with a leading `~` standing for the home folder.
+///
+/// The interface keeps the sessions folder as `~/Library/Application Support/ScanCraft/Sessions`,
+/// and a path read as it stands is relative to wherever the app was started from: the next launch
+/// would make a folder called `~` there and keep the user's sessions in it.
+pub fn path_from_setting(text: &str) -> PathBuf {
+    expand_home(text, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+fn expand_home(text: &str, home: Option<&std::path::Path>) -> PathBuf {
+    let rest = if text == "~" { Some("") } else { text.strip_prefix("~/") };
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        // Not a home path, or no home folder to put it in: the text as it is.
+        _ => PathBuf::from(text),
+    }
+}
+
 /// The settings file plus its in-memory value.
 pub struct SettingsHolder {
     store: SettingsStore<Settings>,
@@ -104,6 +122,24 @@ impl SettingsHolder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_leading_tilde_names_the_home_folder() {
+        let home = std::path::Path::new("/Users/someone");
+        let at = |text: &str| expand_home(text, Some(home));
+        assert_eq!(
+            at("~/Library/Application Support/ScanCraft/Sessions"),
+            PathBuf::from("/Users/someone/Library/Application Support/ScanCraft/Sessions")
+        );
+        assert_eq!(at("~"), PathBuf::from("/Users/someone"));
+        // Anything else is left as it is: an absolute path, a relative one, another user's home,
+        // a tilde that is not the first character.
+        for text in ["/var/sessions", "sessions/here", "~other/x", "a/~/b", ""] {
+            assert_eq!(at(text), PathBuf::from(text), "{text:?}");
+        }
+        // With no home folder there is nothing to put it in.
+        assert_eq!(expand_home("~/x", None), PathBuf::from("~/x"));
+    }
+
     use super::*;
 
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
