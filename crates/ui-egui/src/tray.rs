@@ -157,10 +157,8 @@ fn export_button(ui: &mut Ui, state: &mut UiState) {
         state.export_popover = !state.export_popover;
     }
     if state.export_popover {
-        egui::Popup::from_response(&response)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                crate::export::export_options_popover(ui, state);
-            });
+        egui::Popup::from_response(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            crate::export::export_options_popover(ui, state);
+        });
     }
 }
