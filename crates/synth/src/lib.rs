@@ -1,7 +1,13 @@
 //! Synthetic scenes and evaluation (specification §10). Owner: WP4.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod background;
+pub mod camera;
+pub mod font;
+pub mod geom;
 pub mod metrics;
+pub mod page;
+pub mod sheet;
 
 use scancraft_core::CoreError;
 use scancraft_core::image::Rgb8;
