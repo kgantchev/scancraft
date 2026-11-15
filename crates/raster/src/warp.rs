@@ -375,4 +375,46 @@ mod tests {
         assert!(warp_rgb(&rgb, &map, 0, 10).is_err());
         assert!(warp_rgb(&rgb, &map, 100_000, 100_000).is_err());
     }
+
+    /// A28's unrolled sheet, evaluated by column (bend across) or by row (bend down), gives the
+    /// pixels that point-by-point evaluation gives; a flat one gives A12's pixels.
+    #[test]
+    fn an_unrolled_sheet_warps_like_its_mapping() {
+        use scancraft_core::camera::{Camera, FocalSource};
+        use scancraft_core::recipe::{BendMode, Sheet};
+        use scancraft_geom::sheet::unroll;
+
+        struct PointByPoint<'a, M: PageMap>(&'a M);
+        impl<M: PageMap> PageMap for PointByPoint<'_, M> {
+            fn map(&self, u: f64, v: f64) -> Option<Point> {
+                self.0.map(u, v)
+            }
+        }
+
+        let camera = Camera { width: 400.0, height: 300.0, f: 0.75, source: FocalSource::Typical };
+        let rgb = random_rgb(400, 300, 6);
+        for (mode, chord, profile) in
+            [(BendMode::Across, 0.72, [0.01, 0.03, 0.05, 0.07, 0.08, 0.08, 0.07, 0.05, 0.03, 0.01]), (BendMode::Down, 1.38, [0.0; 10])]
+        {
+            let sheet = Sheet {
+                mode,
+                rotation: [1.0, 0.0, 0.0, 0.0, 0.9805807, 0.1961161, 0.0, -0.1961161, 0.9805807],
+                translation: [-0.3, -0.5, 1.2],
+                chord,
+                profile,
+                focal: 0.75,
+                focal_source: FocalSource::Typical,
+                cost: 0.0,
+            };
+            let unrolled = unroll(&sheet, &camera).unwrap();
+            let fast = warp_rgb(&rgb, &unrolled, 150, 200).unwrap();
+            let direct = warp_rgb(&rgb, &PointByPoint(&unrolled), 150, 200).unwrap();
+            let worst =
+                fast.data().iter().zip(direct.data()).map(|(a, b)| (0..3).map(|c| (a[c] - b[c]).abs()).fold(0f32, f32::max)).fold(0f32, f32::max);
+            // Random pixels change by up to 1 over a pixel, and the two evaluations differ by under
+            // 1e-4 px, so the images agree to within a few thousandths.
+            assert!(worst < 5e-3, "{mode:?}: worst difference {worst}");
+            assert!(fast.data().iter().any(|p| *p != [1.0, 1.0, 1.0]), "{mode:?}: nothing was drawn");
+        }
+    }
 }
