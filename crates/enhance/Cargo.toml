@@ -16,3 +16,6 @@ scancraft-geom = { workspace = true }
 scancraft-raster = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+scancraft-synth = { workspace = true }
