@@ -6,6 +6,7 @@ pub mod blur;
 pub mod camera;
 pub mod damage;
 pub mod datasets;
+pub mod eval;
 pub mod font;
 pub mod generate;
 pub mod geom;
