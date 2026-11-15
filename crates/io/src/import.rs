@@ -165,7 +165,14 @@ fn source_profile(image: &Image) -> Option<Profile> {
     let profile = match &image.icc {
         // A profile that doesn't parse is not a broken file: the pixels are taken as sRGB.
         Some(bytes) => Profile::parse(bytes).ok(),
-        None => image.cicp.and_then(|c| cicp_rgb(c.primaries, c.transfer, image.sample_type().is_float())),
+        // A built-in profile is parsed from its own bytes, like an embedded one. The shared
+        // transform store is keyed by the profile's bytes, and a transform built from the exact
+        // in-memory profile differs by a level from one built from the parsed bytes, so which one
+        // was built first would otherwise decide the pixels.
+        None => image
+            .cicp
+            .and_then(|c| cicp_rgb(c.primaries, c.transfer, image.sample_type().is_float()))
+            .and_then(|p| Profile::parse(&p.to_bytes()).ok()),
     }?;
     // A transform from sRGB to sRGB would only add rounding.
     if profile.to_bytes() == srgb {
@@ -657,5 +664,30 @@ mod tests {
         .with_icc(Some(Builtin::DisplayP3.profile().to_bytes().to_vec()));
         let run = |n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap().install(|| to_srgb(&image).unwrap());
         assert_eq!(run(1), run(8));
+    }
+
+    /// The shared transform store is keyed by a profile's bytes. A transform built from the
+    /// exact in-memory built-in profile differs by a level from one built from the parsed bytes,
+    /// so the pixels must not depend on which of the two reached the store first.
+    #[test]
+    fn the_pixels_do_not_depend_on_what_the_shared_store_holds() {
+        use craft_image_codecs::Cicp;
+        let samples: Vec<u16> = (0..100 * 100 * 3).map(|i: u32| (i.wrapping_mul(2654435761) >> 16) as u16).collect();
+        let p3_bytes = Builtin::DisplayP3.profile().to_bytes().to_vec();
+        // The reference: a transform built straight from the parsed bytes, never shared.
+        let parsed = craft_cms::Profile::parse(&p3_bytes).unwrap();
+        let reference = Transform::with_options(&parsed, Builtin::Srgb.profile(), super::transform_options()).unwrap();
+        let mut expected = vec![0u16; samples.len()];
+        reference.convert_u16(&samples, 3, &mut expected, 3, false).unwrap();
+        let expected: Vec<u8> = expected.iter().map(|&v| super::round_16_to_8(v)).collect();
+        // An nclx image fills the store first, then an ICC image of the same profile reads it.
+        let mut by_nclx = Image::from_u16(100, 100, ChannelLayout::Rgb, &samples).unwrap();
+        by_nclx.cicp = Some(Cicp { primaries: 12, transfer: 13, matrix: 0, full_range: true });
+        let first = to_srgb(&by_nclx).unwrap();
+        let by_icc = Image::from_u16(100, 100, ChannelLayout::Rgb, &samples).unwrap().with_icc(Some(p3_bytes));
+        let second = to_srgb(&by_icc).unwrap();
+        let flat = |image: &Rgb8| -> Vec<u8> { image.data().iter().flatten().copied().collect() };
+        assert_eq!(flat(&second), expected);
+        assert_eq!(flat(&first), expected);
     }
 }
