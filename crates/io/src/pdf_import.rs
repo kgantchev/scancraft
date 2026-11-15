@@ -87,7 +87,7 @@ fn over_white(rgba: &[u8], width: u32, height: u32) -> Result<Rgb8, IoError> {
     let mut out = vec![[0u8; 3]; w * h];
     let band = w * BAND_ROWS as usize;
     out.par_chunks_mut(band.max(1)).zip(rgba.par_chunks((band * 4).max(4))).for_each(|(dst, src)| {
-        for (pixel, px) in dst.iter_mut().zip(src.chunks_exact(4)) {
+        for (pixel, px) in dst.iter_mut().zip(src.as_chunks::<4>().0.iter()) {
             let inverse = 255 - u16::from(px[3]);
             *pixel = [0, 1, 2].map(|c| (u16::from(px[c]) + inverse).min(255) as u8);
         }

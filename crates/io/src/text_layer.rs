@@ -1,6 +1,5 @@
 // Ported from PdfCraft (https://github.com/storytold/pdfcraft), commit
-// c944f106dd63eb9a33c7348eed1f03548cbd6468: `PlacedWord::place`, `text_layer`, `ink_extent` and
-// `num` from `crates/ocr/src/lib.rs`, and the idea of `TextPlan` from `crates/fonts/src/plan.rs`,
+// c944f106dd63eb9a33c7348eed1f03548cbd6468: `PlacedWord::place`, `text_layer` and `num` from `crates/ocr/src/lib.rs`, and the idea of `TextPlan` from `crates/fonts/src/plan.rs`,
 // simplified here: ScanCraft embeds no font, so every Type3 glyph is empty and advances a fixed
 // half em.
 //
@@ -50,12 +49,12 @@ const MAX_TYPE3_CHARS: usize = 2400;
 const MAX_WORDS: usize = 100_000;
 const MAX_WORD_CHARS: usize = 4096;
 
-/// Helvetica's ascender and descender (em fractions): a word box spans about this much.
+/// Helvetica's ascender and descender (em fractions): the em box a word's box is fitted to.
+/// Viewers and extraction tools (pdftotext, Preview, Chrome) take a word's height from the font's
+/// ascender and descender, so fitting that span to the word's box makes the highlight and the
+/// extracted box equal the box the recogniser found.
 const BOX_EM: f64 = 0.93;
 const DESCENT: f64 = 0.21;
-/// Helvetica's cap height and x-height (em fractions).
-const CAP_HEIGHT: f64 = 0.718;
-const X_HEIGHT: f64 = 0.523;
 
 /// A word placed on a page, in PDF user space: the bottom-left corner of its box, and the vectors
 /// along its bottom edge (`across`, left → right as read) and its left edge (`up`).
@@ -77,20 +76,6 @@ impl PlacedWord {
         let tl = to_user(l, t);
         PlacedWord { text: word.text.clone(), origin: o, across: [br[0] - o[0], br[1] - o[1]], up: [tl[0] - o[0], tl[1] - o[1]] }
     }
-}
-
-/// How far `text`'s ink reaches above and below the baseline, in em fractions: a word box is
-/// tight around the ink, so "DT" spans the cap height only, "sun" the x-height, and "gap" reaches
-/// down to the descender. Text without letters or digits keeps the full ascender-descender span.
-fn ink_extent(text: &str) -> (f64, f64) {
-    if !text.chars().any(char::is_alphanumeric) {
-        return (BOX_EM - DESCENT, -DESCENT);
-    }
-    let tall = text
-        .chars()
-        .any(|c| c.is_uppercase() || c.is_ascii_digit() || "bdfhijklt!?/\\()[]{}|'\"#$%&@".contains(c) || (c.is_alphabetic() && !c.is_ascii()));
-    let low = text.chars().any(|c| "gjpqy()[]{}|_".contains(c));
-    (if tall { CAP_HEIGHT } else { X_HEIGHT }, if low { -DESCENT } else { 0.0 })
 }
 
 /// A number for a content stream: four decimals, trailing zeros trimmed, `-0` written as `0`.
@@ -201,11 +186,12 @@ pub fn text_layer(lines: &[TextLine], page_px: (u32, u32), page_pt: (f64, f64)) 
         if width <= 0.0 || !(height > 0.0 && height.is_finite()) || !(across > 0.0 && across.is_finite()) || !w.origin.iter().all(|v| v.is_finite()) {
             continue;
         }
-        // The em square. Helvetica words: the word's own ink (cap height or x-height, descenders
-        // or not) spans the box, so the text is as tall as the scanned word. Type3 words: the
-        // Helvetica letter heights do not describe the face, so the box spans the
-        // ascender–descender height. Either way the width is stretched to fit the word.
-        let (top, bottom) = if planned.is_some() { (BOX_EM - DESCENT, -DESCENT) } else { ink_extent(&w.text) };
+        // The em square. The ascender–descender span fills the word's box, for Helvetica and Type3
+        // words alike, and the width is stretched to fit. (PdfCraft sized a Helvetica word by the
+        // height of its ink, the cap height or x-height; that makes the highlight and the box
+        // pdftotext reports as much as 1.8 times too tall for a word like "sun", so A21's IoU test
+        // could not hold for it.)
+        let (top, bottom) = (BOX_EM - DESCENT, -DESCENT);
         let em = [w.up[0] / (top - bottom), w.up[1] / (top - bottom)];
         let o = [w.origin[0] - em[0] * bottom, w.origin[1] - em[1] * bottom];
         match &planned {
@@ -353,12 +339,13 @@ mod tests {
         let natural = helvetica_width("Hello", 1.0);
         assert!((m[0] * natural - f64::from(rect[2] - rect[0]) * sx).abs() < 1e-3);
         assert!(m[1].abs() < 1e-9);
-        // Up: "Hello" has tall letters and no descender, so the em is the box height over the cap height.
+        // Up: the ascender–descender span (0.93 em) fills the box's height.
         let height = f64::from(rect[3] - rect[1]) * sy;
-        assert!((m[3] - height / 0.718).abs() < 1e-3, "{m:?}");
-        // The origin is the box's bottom-left corner in user space, y flipped.
+        assert!((m[3] - height / 0.93).abs() < 1e-3, "{m:?}");
+        // The origin is the box's bottom-left corner in user space, y flipped, raised to the baseline.
         assert!((m[4] - 100.0 * sx).abs() < 1e-3);
-        assert!((m[5] - (PT.1 - 260.0 * sy)).abs() < 1e-3);
+        // The em's baseline sits 0.21 em above the box's bottom edge (the descender).
+        assert!((m[5] - (PT.1 - 260.0 * sy + 0.21 * m[3])).abs() < 1e-3, "{m:?}");
         // A Type3 word's across vector spans half an em per code.
         let layer = text_layer(&[line(vec![word("Привет", [100.0, 200.0, 400.0, 260.0])])], PX, PT).unwrap();
         let (m, codes) = shown(&layer.content).remove(0);
@@ -432,15 +419,6 @@ mod tests {
         assert_eq!(num(595.28), "595.28");
         assert_eq!(num(-12.0), "-12");
         assert_eq!(num(0.333_333), "0.3333");
-    }
-
-    #[test]
-    fn the_ink_extent_follows_the_letters() {
-        use super::ink_extent;
-        assert_eq!(ink_extent("DT"), (0.718, 0.0));
-        assert_eq!(ink_extent("sun"), (0.523, 0.0));
-        assert_eq!(ink_extent("gap"), (0.523, -0.21));
-        assert_eq!(ink_extent("..."), (0.93 - 0.21, -0.21));
     }
 
     #[test]

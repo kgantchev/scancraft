@@ -234,7 +234,7 @@ fn composite_u8(data: &[u8], row: usize, layout: ChannelLayout) -> Vec<u8> {
     if !layout.has_alpha() {
         return data.to_vec();
     }
-    over_white(data, row, 4, |px, out| {
+    over_white(data, row, |px, out| {
         let a = u32::from(px[3]);
         for c in 0..3 {
             out[c] = ((a * u32::from(px[c]) + (255 - a) * 255 + 127) / 255) as u8;
@@ -247,7 +247,7 @@ fn composite_u16(data: &[u16], row: usize, layout: ChannelLayout) -> Vec<u16> {
     if !layout.has_alpha() {
         return data.to_vec();
     }
-    over_white(data, row, 4, |px, out| {
+    over_white(data, row, |px, out| {
         let a = u64::from(px[3]);
         for c in 0..3 {
             out[c] = ((a * u64::from(px[c]) + (65535 - a) * 65535 + 32767) / 65535) as u16;
@@ -260,7 +260,7 @@ fn composite_f32(data: &[f32], row: usize, layout: ChannelLayout) -> Vec<f32> {
     if !layout.has_alpha() {
         return data.to_vec();
     }
-    over_white(data, row, 4, |px, out| {
+    over_white(data, row, |px, out| {
         let a = if px[3].is_finite() { px[3].clamp(0.0, 1.0) } else { 1.0 };
         for c in 0..3 {
             out[c] = a * px[c] + (1.0 - a);
@@ -268,15 +268,17 @@ fn composite_f32(data: &[f32], row: usize, layout: ChannelLayout) -> Vec<f32> {
     })
 }
 
-/// Runs `f` on every 4-sample pixel, writing 3 samples, over bands of 64 rows.
-fn over_white<T: Copy + Send + Sync + Default>(data: &[T], row: usize, stride: usize, f: impl Fn(&[T], &mut [T]) + Sync) -> Vec<T> {
-    let pixels = data.len() / stride;
+/// Runs `f` on every 4-sample pixel, writing 3 samples, over bands of 64 rows of `row` samples.
+fn over_white<T: Copy + Send + Sync + Default>(data: &[T], row: usize, f: impl Fn(&[T; 4], &mut [T; 3]) + Sync) -> Vec<T> {
+    let pixels = data.len() / 4;
     let mut out = vec![T::default(); pixels * 3];
-    let width = (row / stride).max(1);
+    let width = (row / 4).max(1);
     let band_pixels = width * BAND_ROWS as usize;
-    out.par_chunks_mut(band_pixels * 3).zip(data.par_chunks(band_pixels * stride)).for_each(|(o, s)| {
-        for (dst, src) in o.chunks_exact_mut(3).zip(s.chunks_exact(stride)) {
-            f(src, dst);
+    out.par_chunks_mut(band_pixels * 3).zip(data.par_chunks(band_pixels * 4)).for_each(|(o, s)| {
+        let (dst, _) = o.as_chunks_mut::<3>();
+        let (src, _) = s.as_chunks::<4>();
+        for (d, p) in dst.iter_mut().zip(src) {
+            f(p, d);
         }
     });
     out

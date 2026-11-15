@@ -2,7 +2,17 @@ ScanCraft
 Copyright 2026 ArtCraft Team and the ScanCraft contributors
 Licensed under MIT OR Apache-2.0.
 
-Code ported from PdfCraft (https://github.com/storytold/pdfcraft), Apache-2.0, is listed below
+Code ported from PdfCraft (https://github.com/storytold/pdfcraft), MIT OR Apache-2.0, is listed below
 with the PdfCraft commit it came from, as WP3 and WP9 port it (specification §5.3):
 
-(none yet)
+- `crates/io/src/text_layer.rs`: `PlacedWord::place`, `text_layer` and `num` from `crates/ocr/src/lib.rs`, and the idea of `TextPlan` from `crates/fonts/src/plan.rs`, simplified.
+  PdfCraft commit c944f106dd63eb9a33c7348eed1f03548cbd6468.
+- `crates/io/src/pdf_write.rs`: `from_images` and `add_image` from `crates/create/src/lib.rs`, and `type3_font_dict` and `unicode_hex` from `crates/edit/src/text/fallback.rs`, rewritten on `pdf-writer`.
+  PdfCraft commit c944f106dd63eb9a33c7348eed1f03548cbd6468.
+- `crates/io/src/winansi.rs`: `win_ansi_byte`, `win_ansi`, `literal` and the 0x80–0x9F part of the WinAnsi table from `crates/fonts/src/lib.rs` and `crates/fonts/src/encodings.rs`; `helvetica_width` from `crates/fonts/src/std14.rs`.
+  PdfCraft commit c944f106dd63eb9a33c7348eed1f03548cbd6468.
+- `crates/io/src/helvetica.rs`: the Helvetica row of `crates/fonts/src/std14_metrics.rs` (data).
+  PdfCraft commit c944f106dd63eb9a33c7348eed1f03548cbd6468.
+
+PdfCraft is licensed under the MIT License or the Apache License, Version 2.0, at the user's option;
+each ported file keeps PdfCraft's copyright notice in its header.

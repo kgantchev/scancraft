@@ -122,7 +122,7 @@ mod tests {
             while x + 20 < w {
                 let kind = rng.below(4);
                 stroke(x, y, x + 3, y + 28);
-                if kind % 2 == 0 {
+                if kind.is_multiple_of(2) {
                     stroke(x, y, x + 14, y + 3);
                 }
                 if kind > 1 {
