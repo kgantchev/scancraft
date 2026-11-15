@@ -22,3 +22,4 @@ thiserror = { workspace = true }
 craft-jpeg = { workspace = true }
 craft-image-codecs = { workspace = true }
 sha2 = { workspace = true }
+flate2 = { workspace = true }

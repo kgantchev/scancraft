@@ -4114,6 +4114,7 @@ version = "0.1.0"
 dependencies = [
  "craft-image-codecs",
  "craft-jpeg",
+ "flate2",
  "image",
  "rayon",
  "scancraft-core",
