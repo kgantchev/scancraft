@@ -1307,7 +1307,7 @@ Each scene records its true corners, ratio and ink mask, and for bent pages the 
 - **Line straightness:** A29's measure, in pixels at 300 DPI, on the flattened page and on the page flattened by its corners alone.
 - Ratio error, character error rate, and binarisation F-measure.
 
-`scancraft-cli eval` writes every metric to a JSON report, which is attached to each release.
+`scancraft-cli eval` writes every metric to a JSON report, which is attached to each release. The pipeline's answers come in with `--found results.json`, one record per photo; the formats of the scene files, the data sets and the records are in `crates/synth/README.md`. The UVDoc benchmark's `.mat` grids are HDF5, which no crate in the workspace reads, so the loader takes a `.npy` or `.json` export (one `np.save` call converts them).
 
 ### 10.4 Release gates
 

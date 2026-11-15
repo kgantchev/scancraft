@@ -1,7 +1,20 @@
 //! Synthetic scenes and evaluation (specification §10). Owner: WP4.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod background;
+pub mod blur;
+pub mod camera;
+pub mod damage;
+pub mod datasets;
+pub mod eval;
+pub mod font;
+pub mod generate;
+pub mod geom;
 pub mod metrics;
+pub mod page;
+pub mod render;
+pub mod scene_io;
+pub mod sheet;
 
 use scancraft_core::CoreError;
 use scancraft_core::image::Rgb8;
@@ -25,6 +38,5 @@ pub struct Scene {
 
 /// Scene number `index` of `spec`; the same inputs always give the same bytes.
 pub fn generate(spec: &SceneSpec, index: u32) -> Result<Scene, CoreError> {
-    let _ = (spec, index);
-    Err(CoreError::Scene("the generator is not implemented yet (WP4)".into()))
+    generate::generate_full(spec, index).map(|g| g.scene)
 }
