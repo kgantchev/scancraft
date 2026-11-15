@@ -4147,6 +4147,7 @@ dependencies = [
  "scancraft-core",
  "scancraft-geom",
  "scancraft-raster",
+ "scancraft-synth",
  "thiserror 2.0.21",
 ]
 
