@@ -25,6 +25,10 @@ scancraft-core = { workspace = true }
 scancraft-raster = { workspace = true }
 unicode-segmentation = { workspace = true }
 thiserror = { workspace = true }
+# PNG encoding for the Vision hand-off (A8 step 1, A20 step 1): the work image goes to
+# Vision as PNG bytes in an NSData. `image` is declared in the workspace manifest with its
+# png feature; this is a declared dependency, not a new one (build plan §2 rule 3).
+image = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
