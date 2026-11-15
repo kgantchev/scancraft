@@ -1,0 +1,16 @@
+[package]
+name = "scancraft-geom"
+description = "ScanCraft geometry: homography (A12), proportions (A11), the bent-sheet fit and its unrolling (A27, A28)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

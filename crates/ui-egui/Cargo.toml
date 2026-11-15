@@ -1,0 +1,24 @@
+[package]
+name = "scancraft-ui-egui"
+description = "ScanCraft interface: Screens 1–3, loupe, handles, tray, menus, settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+egui = { workspace = true }
+craft-ui = { workspace = true }
+craft-menu = { workspace = true }
+craft-dialogs = { workspace = true }
+craft-keymap = { workspace = true }
+craft-quit = { workspace = true }
+craft-i18n = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }

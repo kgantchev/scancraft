@@ -1,0 +1,18 @@
+[package]
+name = "scancraft-enhance"
+description = "ScanCraft page looks: upright (A15), Even Light (A16), looks (A17), Black & White (A18)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-geom = { workspace = true }
+scancraft-raster = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }

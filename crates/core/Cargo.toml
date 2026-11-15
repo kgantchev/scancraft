@@ -1,0 +1,16 @@
+[package]
+name = "scancraft-core"
+description = "ScanCraft's shared types: geometry, pixel buffers, the page recipe, commands and traits (build plan WP0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

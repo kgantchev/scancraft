@@ -1,0 +1,20 @@
+[package]
+name = "scancraft-detect"
+description = "ScanCraft page detection (A5–A7, A9, A10), curved sides (A25), text lines (A26) and book spreads (A30)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-geom = { workspace = true }
+scancraft-raster = { workspace = true }
+imageproc = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }

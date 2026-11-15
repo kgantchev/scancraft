@@ -1,0 +1,26 @@
+[package]
+name = "scancraft-io"
+description = "ScanCraft import (A1, A2, A24), encoding (A22) and PDF writing (A21, A23)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-raster = { workspace = true }
+craft-image-codecs = { workspace = true }
+craft-heif = { workspace = true }
+craft-cms = { workspace = true }
+craft-metadata = { workspace = true }
+craft-jpeg = { workspace = true }
+craft-stream-codecs = { workspace = true }
+craft-pdf = { workspace = true }
+craft-atomic = { workspace = true }
+pdf-writer = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

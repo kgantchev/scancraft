@@ -1,0 +1,19 @@
+[package]
+name = "scancraft-raster"
+description = "ScanCraft pixel work: downscale (A3), blur (A4), warp (A13), resample (A14), shared helpers (A19), the ink rule (A18 steps 1–5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-geom = { workspace = true }
+rayon = { workspace = true }
+imageproc = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "scancraft-engine"
+description = "ScanCraft engine: sessions, page recipes, commands, undo, jobs, caches, the flatten decision (A29)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-geom = { workspace = true }
+scancraft-raster = { workspace = true }
+scancraft-detect = { workspace = true }
+scancraft-enhance = { workspace = true }
+scancraft-io = { workspace = true }
+craft-atomic = { workspace = true }
+craft-settings = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+unicode-segmentation = { workspace = true }

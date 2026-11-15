@@ -1,0 +1,32 @@
+[package]
+name = "scancraft-apple"
+description = "ScanCraft's Apple Vision services: page detector (A8), text recognition (A20), upright voter (A15)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The repository's one named exception to `unsafe_code = "forbid"` (specification §6.7): deny here,
+# allowed only at the audited `msg_send!` call sites, each with a `// SAFETY:` comment.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+cognitive_complexity = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "deny"
+type_complexity = "allow"
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-raster = { workspace = true }
+unicode-segmentation = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-vision = { workspace = true }

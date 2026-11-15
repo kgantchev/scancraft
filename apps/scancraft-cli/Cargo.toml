@@ -1,0 +1,19 @@
+[package]
+name = "scancraft-cli"
+description = "ScanCraft command-line tool: the same engine without a window (specification §6.9)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+scancraft-core = { workspace = true }
+scancraft-engine = { workspace = true }
+scancraft-synth = { workspace = true }
+ocrs = { workspace = true }
+rten = { workspace = true }
+serde_json = { workspace = true }

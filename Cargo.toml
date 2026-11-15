@@ -1,0 +1,119 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/storytold/scancraft"
+
+# Every dependency of every crate is declared here, by WP0 (build plan §2 rule 3). A work package
+# that needs another one asks for it in a `contract:` pull request.
+[workspace.dependencies]
+# internal
+scancraft-core = { path = "crates/core" }
+scancraft-geom = { path = "crates/geom" }
+scancraft-raster = { path = "crates/raster" }
+scancraft-detect = { path = "crates/detect" }
+scancraft-enhance = { path = "crates/enhance" }
+scancraft-io = { path = "crates/io" }
+scancraft-engine = { path = "crates/engine" }
+scancraft-apple = { path = "crates/apple" }
+scancraft-ui-egui = { path = "crates/ui-egui" }
+scancraft-synth = { path = "crates/synth" }
+
+# craft-libs, one revision for every crate (main on 15 November 2026). It patches egui to the
+# storytold fork at the revision below, which is also WordCraft's.
+craft-image-codecs = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", features = ["heif"] }
+craft-heif = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-cms = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-metadata = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-jpeg = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-stream-codecs = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", default-features = false, features = ["read", "raster"] }
+craft-atomic = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-dialogs = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", features = ["egui"] }
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", features = ["egui"] }
+craft-i18n = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+
+# PDF writing (specification §5.3): pdf-writer, with the text layer ported from PdfCraft in
+# scancraft-io.
+pdf-writer = "0.15"
+
+# image processing (specification §5.2)
+imageproc = { version = "0.27", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# OCR fallback, command-line tool only (specification §5.4)
+ocrs = { version = "0.13.1", default-features = false, features = ["rten"] }
+rten = { version = "0.26", default-features = false, features = ["onnx_format", "rten_format"] }
+
+# Apple Vision, macOS only (specification §6.7)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData", "NSArray", "NSError", "NSDictionary", "NSAutoreleasePool"] }
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNObservation", "VNRecognizeTextRequest", "VNDetectDocumentSegmentationRequest", "VNTypes"] }
+
+# foundation
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+thiserror = "2"
+unicode-segmentation = "1"
+
+# interface
+egui = "0.37"
+eframe = { version = "0.37", default-features = false }
+egui_kittest = "0.37"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cognitive_complexity = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "deny"
+type_complexity = "allow"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 0
+
+# The same patches craft-libs builds with: its patched Hayro reader (craft-pdf's `read` and
+# `raster`) and the storytold egui and winit forks.
+[patch.crates-io]
+hayro = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+hayro-cmap = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+hayro-postscript = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
