@@ -16,6 +16,10 @@ scancraft-engine = { workspace = true }
 scancraft-ui-egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 egui = { workspace = true }
+craft-menu = { workspace = true }
+craft-dialogs = { workspace = true }
+craft-quit = { workspace = true }
+chrono = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scancraft-apple = { workspace = true }
