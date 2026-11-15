@@ -197,8 +197,8 @@ mod tests {
     #[test]
     fn the_gradient_runs_two_and_a_half_to_one() {
         let m = LightModel::new(Light::Gradient, 1000.0, 800.0, &mut Xorshift64Star::new(4));
-        let gains: Vec<f32> =
-            (0..1000).flat_map(|x| (0..800).step_by(50).map(move |y| (x, y))).map(|(x, y)| m.gain(f64::from(x), f64::from(y))[0]).collect();
+        // The photo's four corners are where the ramp reaches its ends.
+        let gains: Vec<f32> = [(0.0, 0.0), (1000.0, 0.0), (0.0, 800.0), (1000.0, 800.0)].iter().map(|&(x, y)| m.gain(x, y)[0]).collect();
         let (lo, hi) = gains.iter().fold((f32::INFINITY, 0f32), |(l, h), &g| (l.min(g), h.max(g)));
         assert!(((hi / lo) - 2.5).abs() < 0.05, "{}", hi / lo);
     }
