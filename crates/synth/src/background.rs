@@ -63,10 +63,10 @@ pub fn background(kind: Background, x: f64, y: f64, w: f64, h: f64, seed: u64) -
             // Rings across a slanted axis, bent by noise, with grain and a few darker knots.
             let angle = 0.3 + 2.0 * lattice(0, 0, seed);
             let along = x * angle.cos() + y * angle.sin();
-            let ring = (along / 22.0 + 4.0 * noise(x / 160.0, y / 160.0, seed ^ 1)).sin() * 0.5 + 0.5;
+            let ring = (along / 38.0 + 1.6 * noise(x / 220.0, y / 220.0, seed ^ 1)).sin() * 0.5 + 0.5;
             let grain = noise(x / 3.0, y / 90.0, seed ^ 2);
             let knot = (-((noise(x / 300.0, y / 300.0, seed ^ 3) - 0.5).powi(2)) / 0.004).exp() * 0.25;
-            let v = 0.32 + 0.16 * ring + 0.05 * grain - knot;
+            let v = 0.36 + 0.07 * ring + 0.03 * grain - knot;
             [v * 1.25, v * 0.88, v * 0.55]
         }
         Background::CheckedCloth => {

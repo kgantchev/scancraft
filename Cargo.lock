@@ -4112,11 +4112,14 @@ dependencies = [
 name = "scancraft-synth"
 version = "0.1.0"
 dependencies = [
+ "craft-image-codecs",
+ "craft-jpeg",
  "image",
  "rayon",
  "scancraft-core",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
