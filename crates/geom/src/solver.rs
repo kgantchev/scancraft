@@ -147,7 +147,9 @@ pub struct LmRow {
 /// A quadratic term added to the normal equations: the bending penalty and the focal prior.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtraTerm {
-    /// The shared unknown the term belongs to.
+    /// The shared unknown the term's gradient belongs to.
+    pub row: usize,
+    /// The shared unknown the term's second derivative belongs to.
     pub column: usize,
     /// The term's second derivative.
     pub second: f64,
@@ -207,10 +209,10 @@ impl LmSystem {
             }
         }
         for term in &self.extra {
-            if let Some(slot) = matrix.get_mut(term.column * n + term.column) {
+            if let Some(slot) = matrix.get_mut(term.row * n + term.column) {
                 *slot += term.second;
             }
-            if let Some(slot) = rhs.get_mut(term.column) {
+            if let Some(slot) = rhs.get_mut(term.row) {
                 *slot -= term.first;
             }
         }
