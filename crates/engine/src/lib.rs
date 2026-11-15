@@ -3,7 +3,15 @@
 //! Owners (build plan §4): WP6 owns everything except `flatten` (A29), which is WP11's.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod cache;
+pub mod crop;
+pub mod curve;
+pub mod error;
 pub mod flatten;
+pub mod jobs;
+pub mod session;
+pub mod settings;
+pub mod undo;
 
 use scancraft_core::command::Command;
 use scancraft_core::engine_api::{EngineApi, ImageKey, LoupeCrop, Screen, ViewState};
