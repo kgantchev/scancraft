@@ -94,7 +94,7 @@ fn ink_extent(text: &str) -> (f64, f64) {
 }
 
 /// A number for a content stream: four decimals, trailing zeros trimmed, `-0` written as `0`.
-fn num(v: f64) -> String {
+pub(crate) fn num(v: f64) -> String {
     let s = format!("{:.4}", if v.abs() < 1e-9 { 0.0 } else { v });
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.into() }
