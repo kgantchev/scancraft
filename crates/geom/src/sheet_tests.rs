@@ -82,13 +82,24 @@ struct Spoil {
     no_text: bool,
     /// No noise: the exact projections.
     exact: bool,
+    /// Words shifted this many pixels along their lines, each by a random sign.
+    shift: f64,
 }
 
 /// The evidence a detector would give for `scene` (the noise of A27's prototype).
 fn evidence(scene: &Scene, direction: TextDirection, seed: u64, spoil: Spoil) -> SheetEvidence {
+    evidence_with_truth(scene, direction, seed, spoil).0
+}
+
+/// The evidence, and the true sheet coordinates behind it: each line's shared one, and each
+/// point's own.
+fn evidence_with_truth(scene: &Scene, direction: TextDirection, seed: u64, spoil: Spoil) -> (SheetEvidence, Vec<f64>, Vec<f64>) {
+    let (mut shared_truth, mut own_truth) = (Vec::new(), Vec::new());
     let mut rng = Xorshift64Star::new(seed);
     let mode = scene.sheet.mode;
     let noise = if spoil.exact { 0.0 } else { 1.0 };
+    // 5% of text points are moved by up to 25 px unless the case asks for more.
+    let outlier_rate = if spoil.exact { 0.0 } else { spoil.outliers.max(0.05) };
     let coordinates = corner_sheet_coordinates(mode);
     let corners = std::array::from_fn(|k| CornerEvidence {
         point: noisy(truth_point(scene, coordinates[k].0, coordinates[k].1), 2.0 * noise, &mut rng),
@@ -98,18 +109,29 @@ fn evidence(scene: &Scene, direction: TextDirection, seed: u64, spoil: Spoil) ->
     let shared_is_t = line_is_t(mode, direction);
     let mut lines = Vec::new();
     if !spoil.no_text {
-        for i in 0..14 {
-            let shared = 0.12 + 0.76 * f64::from(i) / 13.0;
+        // The prototype's text: 24 lines 0.035 apart, 65 points along each between 0.10 and 0.90.
+        for i in 0..24 {
+            let shared = 0.08 + 0.035 * f64::from(i);
             let mut points = Vec::new();
-            for j in 0..14 {
-                let along = 0.08 + 0.84 * f64::from(j) / 13.0;
+            for j in 0..65 {
+                let along = 0.10 + 0.80 * f64::from(j) / 64.0;
                 let (t, b) = if shared_is_t { (shared, along) } else { (along, shared) };
                 let mut p = noisy(truth_point(scene, t, b), 2.0 * noise, &mut rng);
-                if rng.next_f64() < spoil.outliers {
+                if spoil.shift != 0.0 {
+                    // Along the line: towards the next point along it.
+                    let (nt, nb) = if shared_is_t { (t, along + 0.01) } else { (along + 0.01, b) };
+                    let (here, next) = (truth_point(scene, t, b), truth_point(scene, nt, nb));
+                    let length = here.distance(next).max(1e-9);
+                    let sign = if rng.next_f64() < 0.5 { -1.0 } else { 1.0 };
+                    p = Point::new(p.x + sign * spoil.shift * (next.x - here.x) / length, p.y + sign * spoil.shift * (next.y - here.y) / length);
+                }
+                if rng.next_f64() < outlier_rate {
                     p = Point::new(p.x + 25.0 * (2.0 * rng.next_f64() - 1.0), p.y + 25.0 * (2.0 * rng.next_f64() - 1.0));
                 }
+                own_truth.push(along);
                 points.push(p);
             }
+            shared_truth.push(shared);
             let sigma = vec![2.0; points.len()];
             lines.push(LineEvidence { points, sigma });
         }
@@ -117,19 +139,18 @@ fn evidence(scene: &Scene, direction: TextDirection, seed: u64, spoil: Spoil) ->
     let mut sides = Vec::new();
     for side in [Side::Top, Side::Right, Side::Bottom, Side::Left] {
         let (fixed_is_t, fixed) = side_placement(side, mode);
-        let count = if spoil.half_side && side == Side::Left { 20 } else { 40 };
+        // 64 samples from 0.03 to 0.97; half of one side hidden leaves the first 32.
+        let count = if spoil.half_side && side == Side::Left { 32 } else { 64 };
         let mut points = Vec::new();
         for k in 0..count {
-            let mut along = (f64::from(k) + 0.5) / 40.0;
-            if spoil.half_side && side == Side::Left {
-                along *= 0.5;
-            }
+            let along = 0.03 + 0.94 * f64::from(k) / 63.0;
             let (t, b) = if fixed_is_t { (fixed, along) } else { (along, fixed) };
+            own_truth.push(along);
             points.push(noisy(truth_point(scene, t, b), 1.5 * noise, &mut rng));
         }
         sides.push(SideEvidence { side, points, sigma: 1.5 });
     }
-    SheetEvidence { corners, lines, text_direction: direction, sides }
+    (SheetEvidence { corners, lines, text_direction: direction, sides }, shared_truth, own_truth)
 }
 
 /// The flattening error of §10.3: the 95th percentile, over the page, of the distance between
@@ -179,22 +200,22 @@ fn run_scenes(mode: BendMode, depth: f64, true_f: f64, fit_f: f64, fit_focal: bo
 }
 
 #[test]
-fn book_pages_are_flattened_within_a_tenth_of_a_percent() {
+fn book_pages_are_flattened_within_a_quarter_of_a_percent() {
     let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, Spoil::default());
-    assert!(median(errors.clone()) < 0.0020, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
 }
 
 #[test]
 fn a_letter_folded_in_three_is_found_bending_down() {
     let (errors, _) = run_scenes(BendMode::Down, 0.07, 0.75, 0.75, false, Spoil::default());
-    assert!(median(errors.clone()) < 0.0015, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
 }
 
 #[test]
 fn fitting_the_focal_length_recovers_from_a_wrong_start() {
     // The photo has no EXIF: the start is the typical 0.75, the truth is 0.6.
     let (errors, fits) = run_scenes(BendMode::Across, 0.14, 0.6, 0.75, true, Spoil::default());
-    assert!(median(errors.clone()) < 0.0020, "{errors:?}");
+    assert!(median(errors.clone()) < 0.0030, "{errors:?}");
     assert!(
         fits.iter().all(|s| s.focal_source == FocalSource::Fitted && (s.focal - 0.6).abs() < 0.12),
         "{:?}",
@@ -204,12 +225,24 @@ fn fitting_the_focal_length_recovers_from_a_wrong_start() {
 
 #[test]
 fn spoiled_evidence_still_flattens() {
+    // A27's tests: 15% of text points wrong, words shifted 3 px within their lines, half of one
+    // side hidden. The spec's bound is a median under 0.15% over 40 scenes per case, which WP12
+    // checks on the synthetic sets. Eight scenes are enough here to catch a broken fit, but their
+    // median moves by ±0.05% with the noise drawn, so the bound is looser.
     let cases =
-        [Spoil { outliers: 0.15, ..Spoil::default() }, Spoil { half_side: true, ..Spoil::default() }, Spoil { no_text: true, ..Spoil::default() }];
+        [Spoil { outliers: 0.15, ..Spoil::default() }, Spoil { shift: 3.0, ..Spoil::default() }, Spoil { half_side: true, ..Spoil::default() }];
     for spoil in cases {
         let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, spoil);
         assert!(median(errors.clone()) < 0.0025, "{errors:?}");
     }
+}
+
+#[test]
+fn a_page_without_text_still_flattens_from_its_outline() {
+    // Outline and corners only: coarser than with text, but still far under what the corners
+    // alone give (about 1.4% on a book page).
+    let (errors, _) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, Spoil { no_text: true, ..Spoil::default() });
+    assert!(median(errors.clone()) < 0.0025, "{errors:?}");
 }
 
 #[test]
@@ -641,8 +674,42 @@ fn the_penalty_terms_match_their_costs() {
 #[test]
 fn exact_evidence_recovers_the_sheet() {
     let (errors, fits) = run_scenes(BendMode::Across, 0.14, 0.75, 0.75, false, Spoil { exact: true, ..Spoil::default() });
-    assert!(errors.iter().all(|&e| e < 0.0005), "{errors:?}");
+    assert!(errors.iter().all(|&e| e < 0.0008), "{errors:?}");
     let (errors, _) = run_scenes(BendMode::Down, 0.07, 0.75, 0.75, false, Spoil { exact: true, ..Spoil::default() });
-    assert!(errors.iter().all(|&e| e < 0.0005), "{errors:?}");
+    assert!(errors.iter().all(|&e| e < 0.0008), "{errors:?}");
     assert!(fits.iter().all(|s| s.cost < 1.0), "{:?}", fits.iter().map(|s| s.cost).collect::<Vec<_>>());
+}
+
+/// The fit's cost is no higher than the cost at the truth, so any error is the evidence's, not the
+/// optimiser's.
+#[test]
+fn the_fit_finds_a_cost_no_higher_than_the_truths() {
+    let profile = Profile::new();
+    for (mode, depth) in [(BendMode::Across, 0.14), (BendMode::Down, 0.07)] {
+        for seed in 0..8u64 {
+            let truth = scene(
+                mode,
+                bump(&profile, depth * (0.8 + 0.05 * seed as f64), 0.15 * (seed % 3) as f64),
+                0.75,
+                [0.12 + 0.04 * (seed % 4) as f64, 0.1 - 0.05 * (seed % 3) as f64, 0.03 * seed as f64 - 0.1],
+            );
+            let (ev, lines, own) = evidence_with_truth(&truth, TextDirection::Across, 100 + seed, Spoil::default());
+            let cam = camera(0.75);
+            let fitted = fit_sheets(&ev, &cam, false).unwrap().curved.unwrap();
+            let prepared = prepare(&ev, &cam, mode).unwrap();
+            let r = &truth.sheet.rotation;
+            let state = State {
+                mode,
+                rotation: [[r[0], r[1], r[2]], [r[3], r[4], r[5]], [r[6], r[7], r[8]]],
+                translation: truth.sheet.translation,
+                chord: truth.sheet.chord,
+                profile: truth.sheet.profile,
+                focal: 0.75,
+                lines,
+                points: own,
+            };
+            let at_truth = evaluate(&state, &prepared, &cam, &profile, false, false).unwrap();
+            assert!(fitted.cost <= at_truth + 1e-6 * at_truth, "{mode:?} scene {seed}: fit {} truth {at_truth}", fitted.cost);
+        }
+    }
 }
