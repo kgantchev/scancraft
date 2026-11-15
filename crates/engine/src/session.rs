@@ -65,6 +65,11 @@ impl Session {
         Ok(session)
     }
 
+    /// A session that touches no disk until something is saved (and then fails): for when no folder can be made.
+    pub fn detached(dir: impl Into<PathBuf>) -> Session {
+        Session { dir: dir.into(), file: empty_file(), pending: Vec::new(), next_photo: 1, next_page: 1, repairs: Vec::new() }
+    }
+
     /// Opens a session folder; one with no `session.json` yet starts empty. A file written by a
     /// newer version is refused; one from an older version is read. What a hand edit broke is
     /// repaired (and reported by [`Session::take_repairs`]) rather than trusted.
@@ -94,7 +99,7 @@ impl Session {
         Ok(Session { dir, file, pending, next_photo, next_page, repairs })
     }
 
-    pub fn dir(&self) -> &Path {
+    pub fn dir(&self) -> &PathBuf {
         &self.dir
     }
 

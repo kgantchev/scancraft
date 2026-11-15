@@ -132,6 +132,11 @@ impl Cache {
         Ok(Cache { dir, photos: Mutex::new(Vec::new()) })
     }
 
+    /// A cache that makes no folder until it writes: for when the folder couldn't be made.
+    pub fn unchecked(dir: PathBuf) -> Cache {
+        Cache { dir, photos: Mutex::new(Vec::new()) }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }

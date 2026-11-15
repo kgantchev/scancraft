@@ -83,6 +83,8 @@ pub struct JobMeta {
     pub photo: Option<PhotoId>,
     /// The recipe's generation when the job was made; a result from an older one is dropped.
     pub generation: u64,
+    /// Identifies the request, so the engine can tell when it is no longer in flight.
+    pub tag: u64,
 }
 
 pub type JobWork<T> = Box<dyn FnOnce(&CancellationToken) -> Result<T, EngineError> + Send + 'static>;
@@ -145,39 +147,48 @@ impl<T> Shared<T> {
     }
 }
 
-/// The scheduler thread and the rayon pool.
+/// The scheduler thread and the rayon pool. When they can't be started the runner works inline: a
+/// job runs on the thread that submits it, so the app still works, only less smoothly.
 pub struct JobRunner<T: Send + 'static> {
     shared: Arc<Shared<T>>,
     results: Receiver<JobDone<T>>,
+    inline_tx: Sender<JobDone<T>>,
     scheduler: Option<JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> JobRunner<T> {
     /// Starts the scheduler and a pool of `threads` workers (at least one).
-    pub fn new(threads: usize) -> Result<JobRunner<T>, EngineError> {
+    pub fn new(threads: usize) -> JobRunner<T> {
         let threads = threads.max(1);
-        let pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|i| format!("scancraft-pool-{i}"))
-                .build()
-                .map_err(|e| EngineError::msg(format!("the worker pool could not start: {e}")))?,
-        );
         let shared =
             Arc::new(Shared { state: Mutex::new(State { heap: BinaryHeap::new(), running: 0, seq: 0, shutdown: false }), wake: Condvar::new() });
         let (tx, results) = channel();
-        let scheduler = {
-            let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("scancraft-scheduler".to_string())
-                .spawn(move || schedule(&shared, &pool, threads, &tx))
-                .map_err(|e| EngineError::msg(format!("the scheduler could not start: {e}")))?
-        };
-        Ok(JobRunner { shared, results, scheduler: Some(scheduler) })
+        let inline_tx = tx.clone();
+        let started =
+            rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("scancraft-pool-{i}")).build().ok().and_then(|pool| {
+                let pool = Arc::new(pool);
+                let shared = shared.clone();
+                std::thread::Builder::new().name("scancraft-scheduler".to_string()).spawn(move || schedule(&shared, &pool, threads, &tx)).ok()
+            });
+        JobRunner { shared, results, inline_tx, scheduler: started }
     }
 
     /// Queues a job.
     pub fn submit(&self, job: Job<T>) {
+        if self.scheduler.is_none() {
+            // No scheduler: run it here, unless it is already cancelled.
+            let Job { token, meta, work, .. } = job;
+            let outcome = if token.is_cancelled() {
+                Err(EngineError::Cancelled)
+            } else {
+                match catch_unwind(AssertUnwindSafe(|| work(&token))) {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(EngineError::msg("the page could not be prepared because of an internal error")),
+                }
+            };
+            let _ = self.inline_tx.send(JobDone { meta, outcome });
+            return;
+        }
         let mut state = self.shared.lock();
         state.seq += 1;
         let seq = state.seq;
@@ -238,7 +249,9 @@ fn schedule<T: Send + 'static>(shared: &Arc<Shared<T>>, pool: &Arc<rayon::Thread
                     && let Some(next) = state.heap.pop()
                 {
                     if next.job.token.is_cancelled() {
-                        // Stale before it started: it never runs and says nothing.
+                        // Stale before it started: it never runs; the result only says so, so whoever
+                        // is waiting for it can stop.
+                        let _ = tx.send(JobDone { meta: next.job.meta, outcome: Err(EngineError::Cancelled) });
                         continue;
                     }
                     state.running += 1;
@@ -298,7 +311,7 @@ mod tests {
 
     #[test]
     fn previews_run_before_detection_renders_and_recognition() {
-        let runner = JobRunner::<u32>::new(1).unwrap();
+        let runner = JobRunner::<u32>::new(1);
         let (release, held) = sync_channel(1);
         runner.submit(blocker(held));
         std::thread::sleep(Duration::from_millis(50));
@@ -314,7 +327,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_job_does_not_run() {
-        let runner = JobRunner::<u32>::new(1).unwrap();
+        let runner = JobRunner::<u32>::new(1);
         let (release, held) = sync_channel(1);
         runner.submit(blocker(held));
         std::thread::sleep(Duration::from_millis(50));
@@ -329,8 +342,25 @@ mod tests {
     }
 
     #[test]
+    fn a_job_cancelled_before_it_ran_still_reports_that_it_did_not() {
+        let runner = JobRunner::<u32>::new(1);
+        let (release, held) = sync_channel(1);
+        runner.submit(blocker(held));
+        std::thread::sleep(Duration::from_millis(50));
+        let stale = job(JobPriority::Render, 7);
+        stale.token.cancel();
+        runner.submit(stale);
+        release.send(()).unwrap();
+        assert!(runner.wait_idle(Duration::from_secs(10)));
+        let done = runner.drain();
+        let cancelled: Vec<_> = done.iter().filter(|d| d.outcome == Err(EngineError::Cancelled)).collect();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].meta.generation, 7, "the report carries the job's meta, so its request can be cleared");
+    }
+
+    #[test]
     fn a_running_job_sees_its_cancellation() {
-        let runner = JobRunner::<u32>::new(2).unwrap();
+        let runner = JobRunner::<u32>::new(2);
         let (started_tx, started) = sync_channel(1);
         let token = CancellationToken::new();
         let seen = token.clone();
@@ -357,7 +387,7 @@ mod tests {
 
     #[test]
     fn an_escaped_panic_becomes_an_error_for_that_page() {
-        let runner = JobRunner::<u32>::new(2).unwrap();
+        let runner = JobRunner::<u32>::new(2);
         runner.submit(Job {
             priority: JobPriority::Render,
             token: CancellationToken::new(),
@@ -382,7 +412,7 @@ mod tests {
 
     #[test]
     fn the_caller_is_never_blocked_by_a_job() {
-        let runner = JobRunner::<u32>::new(1).unwrap();
+        let runner = JobRunner::<u32>::new(1);
         let (release, held) = sync_channel(1);
         let started = std::time::Instant::now();
         runner.submit(blocker(held));
@@ -397,7 +427,7 @@ mod tests {
 
     #[test]
     fn dropping_the_runner_with_queued_work_does_not_hang() {
-        let runner = JobRunner::<u32>::new(1).unwrap();
+        let runner = JobRunner::<u32>::new(1);
         let (_release, held) = sync_channel(1);
         runner.submit(blocker(held));
         let queued = job(JobPriority::Render, 1);

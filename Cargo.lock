@@ -4039,6 +4039,7 @@ dependencies = [
 name = "scancraft-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "craft-atomic",
  "craft-settings",
  "rayon",

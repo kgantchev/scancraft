@@ -26,6 +26,8 @@ pub struct Settings {
     pub keep_paper_colour: bool,
     /// Where sessions live; `None` for the system default.
     pub sessions_dir: Option<String>,
+    /// Book Spreads as the last session left it; it becomes the next session's default (§4.3).
+    pub book_spreads: bool,
 }
 
 impl Settings {
@@ -47,6 +49,7 @@ impl Settings {
             language_correction: true,
             keep_paper_colour: false,
             sessions_dir: None,
+            book_spreads: false,
         }
     }
 }
