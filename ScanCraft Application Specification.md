@@ -808,7 +808,7 @@ When the native density exceeds the output DPI by more than 2%, the warped page 
 
 Output DPI: Original, Color Document and Grayscale use the smaller of the preset's DPI and the native density; Black & White always uses the preset's DPI (A18).
 
-**Tests:** a constant image stays constant; a zone plate shows no visible aliasing; a grating at 0.4 cycles per output pixel keeps at least 90% of its contrast.
+**Tests:** a constant image stays constant; a zone plate shows no visible aliasing; a grating at 0.3 cycles per output pixel keeps at least 90% of its contrast, and one at 0.4 cycles keeps at least 70% (the kernel's own response is 0.99 at 0.3 cycles and 0.82 at 0.4, so no Lanczos-3 filter could keep 90% at 0.4).
 
 ### A15. Upright
 

@@ -88,15 +88,14 @@ impl VanHerk {
 
 /// Copies a plane of `w` columns and `h` rows into one of `h` columns and `w` rows, so that
 /// the samples of a column become contiguous.
-fn transpose(src: &[f32], w: usize, h: usize, dst: &mut [f32]) {
+pub(crate) fn transpose<T: Copy>(src: &[T], w: usize, h: usize, dst: &mut [T]) {
     const TILE: usize = 32;
     for x0 in (0..w).step_by(TILE) {
         for y0 in (0..h).step_by(TILE) {
             for x in x0..(x0 + TILE).min(w) {
                 for y in y0..(y0 + TILE).min(h) {
-                    let v = src.get(y * w + x).copied().unwrap_or(0.0);
-                    if let Some(slot) = dst.get_mut(x * h + y) {
-                        *slot = v;
+                    if let (Some(v), Some(slot)) = (src.get(y * w + x), dst.get_mut(x * h + y)) {
+                        *slot = *v;
                     }
                 }
             }
