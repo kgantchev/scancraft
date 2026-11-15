@@ -1,0 +1,26 @@
+{
+  "about": "What VNDetectDocumentSegmentationRequest returned for fixtures/flat.png: the corners of its first observation, normalised, origin at the bottom left, in the order topLeft, topRight, bottomRight, bottomLeft.",
+  "corners": [
+    [
+      0.3055555522441864,
+      0.91015625
+    ],
+    [
+      0.7222222089767456,
+      0.86328125
+    ],
+    [
+      0.6597222089767456,
+      0.17578125
+    ],
+    [
+      0.3055555522441864,
+      0.16796875
+    ]
+  ],
+  "image": "fixtures/flat.png",
+  "size": [
+    960,
+    720
+  ]
+}
