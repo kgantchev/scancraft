@@ -82,6 +82,8 @@ ScanCraft is a macOS app, in Rust, that turns photos of paper documents into cle
 
 `cargo xtask layers` enforces this. **`crates/core` is a contract**: change it only in a pull request titled `contract: …` that does nothing else (build plan §2).
 
+**Dependencies**: the workspace `Cargo.toml` declares every crate and every dependency. A package may add to its own crate's `Cargo.toml` any dependency that manifest already declares, written as `{ name } = { workspace = true }` — a declared dependency the package had not needed yet, not a new one. It may not introduce a dependency the workspace does not declare; that needs a `contract:` pull request (build plan §2).
+
 - **Everything is a command** (`scancraft_core::command::Command`). Buttons, menus, shortcuts, the CLI and tests run commands by id. Commands run by a program never open dialogs.
 - **Deterministic:** pixel loops work in fixed 64-row bands (`scancraft_core::image::bands`); random sampling uses `Xorshift64Star` seeded by `seed_for`. One thread and eight threads must give identical results; test it.
 - **Rust only** (no handwritten JS/TS). PDFs are written with `pdf-writer`; code ported from PdfCraft (Apache-2.0) records its source commit and keeps PdfCraft's notice (`NOTICE`).
