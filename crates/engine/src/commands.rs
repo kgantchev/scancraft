@@ -50,7 +50,9 @@ impl Engine {
             }
             _ => {}
         }
-        let recordable = !matches!(command, Command::ExportPdf { .. } | Command::SessionNew | Command::SessionRestore | Command::ImportAdd { .. });
+        // Exporting and changing sessions are not undone: the PDF stays on disk, and the old
+        // session's files live in the old session's folder.
+        let recordable = !matches!(command, Command::ExportPdf { .. } | Command::SessionNew | Command::SessionRestore);
         let before = self.snapshot();
         match self.run(&command) {
             Ok(()) => {
@@ -146,45 +148,57 @@ impl Engine {
         let bytes = read_capped(path)?;
         let kind = sniff(&bytes).ok_or_else(|| "this isn't a supported image or PDF.".to_string())?;
         let source = SourceId(scancraft_io::import::source_id(&bytes));
-        // The origins to import, with the name each gets.
-        let mut items: Vec<(ImportOrigin, String)> = Vec::new();
-        match kind {
+        let tiff_pages = if kind == Kind::Tiff { scancraft_io::import::tiff_page_count(&bytes) } else { 0 };
+        // The first item of the file: the same file (or the same page of it) twice is imported once.
+        let first = match kind {
+            Kind::Pdf => ImportOrigin::PdfPage { index: 0 },
+            Kind::Tiff if tiff_pages > 1 => ImportOrigin::TiffPage { index: 0 },
+            _ => ImportOrigin::File,
+        };
+        if self.session.file().photos.iter().any(|p| p.source == source && p.origin == first) {
+            self.notify(format!("{name} was already imported."), false);
+            return Ok(0);
+        }
+        // The source is copied into the session before it is read, so the bytes can be moved into the
+        // PDF's reader. A file that turns out to be unreadable leaves nothing behind.
+        let stored = self.session.source_path(&source);
+        let existed = stored.exists();
+        self.session.add_source(&source, &bytes).map_err(|e| e.to_string())?;
+        let items: Vec<(ImportOrigin, String)> = match kind {
             Kind::Pdf => {
-                let doc = scancraft_io::pdf_import::PdfDocument::open(bytes.clone()).map_err(|e| e.to_string())?;
+                let doc = match scancraft_io::pdf_import::PdfDocument::open(bytes) {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        if !existed {
+                            let _ = std::fs::remove_file(&stored);
+                        }
+                        return Err(e.to_string());
+                    }
+                };
                 let count = doc.page_count() as usize;
                 if count == 0 {
+                    if !existed {
+                        let _ = std::fs::remove_file(&stored);
+                    }
                     return Err("the PDF has no pages.".to_string());
                 }
                 if count > MAX_PAGES {
                     self.notify(format!("{name} has {count} pages; only the first {MAX_PAGES} were imported."), false);
                 }
-                for index in 0..count.min(MAX_PAGES) {
-                    items.push((ImportOrigin::PdfPage { index: index as u32 }, format!("{name}, page {}", index + 1)));
-                }
+                (0..count.min(MAX_PAGES))
+                    .map(|index| (ImportOrigin::PdfPage { index: index as u32 }, format!("{name}, page {}", index + 1)))
+                    .collect()
             }
-            Kind::Tiff => {
-                let count = scancraft_io::import::tiff_page_count(&bytes);
-                if count > 1 {
-                    if count > MAX_PAGES {
-                        self.notify(format!("{name} has {count} pages; only the first {MAX_PAGES} were imported."), false);
-                    }
-                    for index in 0..count.min(MAX_PAGES) {
-                        items.push((ImportOrigin::TiffPage { index: index as u32 }, format!("{name}, page {}", index + 1)));
-                    }
-                } else {
-                    items.push((ImportOrigin::File, name.to_string()));
+            Kind::Tiff if tiff_pages > 1 => {
+                if tiff_pages > MAX_PAGES {
+                    self.notify(format!("{name} has {tiff_pages} pages; only the first {MAX_PAGES} were imported."), false);
                 }
+                (0..tiff_pages.min(MAX_PAGES))
+                    .map(|index| (ImportOrigin::TiffPage { index: index as u32 }, format!("{name}, page {}", index + 1)))
+                    .collect()
             }
-            Kind::Image => items.push((ImportOrigin::File, name.to_string())),
-        }
-        // The same file (or page of it) twice is imported once.
-        let first = items.first().map(|(o, _)| o.clone());
-        if let Some(first) = first
-            && self.session.file().photos.iter().any(|p| p.source == source && p.origin == first)
-        {
-            return Err("this file was already imported.".to_string());
-        }
-        self.session.add_source(&source, &bytes).map_err(|e| e.to_string())?;
+            _ => vec![(ImportOrigin::File, name.to_string())],
+        };
         let room = MAX_PAGES.saturating_sub(self.session.file().photos.len());
         let mut added = 0;
         for (origin, label) in items.into_iter().take(room) {
@@ -216,6 +230,8 @@ impl Engine {
         if !in_tray {
             self.session.file_mut().photos.retain(|p| p.id != photo);
             self.status.remove(&photo);
+            self.detected.remove(&photo);
+            self.names.remove(&photo);
         }
         if self.current_photo == Some(photo) {
             self.current_photo = None;
@@ -319,7 +335,9 @@ impl Engine {
             // After a restore nothing was kept: detect again; the result is applied when it arrives.
             let item = self.session.photo(page.photo).cloned().ok_or(EngineError::NoPhoto(page.photo))?;
             self.want_auto.insert(id);
-            self.submit_detect(&item);
+            if !self.detect_inflight(page.photo) {
+                self.submit_detect(&item);
+            }
             return Ok(());
         };
         self.apply_detected_to(id, &found)
@@ -369,7 +387,8 @@ impl Engine {
     pub(crate) fn split_pending(&mut self, photo: PhotoId) -> Result<(), EngineError> {
         let ids = self.pending_ids(photo);
         let [id] = ids[..] else {
-            return if ids.is_empty() { Err(EngineError::msg("This photo has no page to split.")) } else { Ok(()) };
+            // Nothing to cut, or already cut in two: there is no work to do.
+            return Ok(());
         };
         let Some(index) = self.session.pending().iter().position(|p| p.id == id) else { return Ok(()) };
         let Some(whole) = self.session.pending().get(index).cloned() else { return Ok(()) };
@@ -459,6 +478,9 @@ impl Engine {
             return Err(EngineError::NoPhoto(photo));
         }
         if on {
+            if self.pending_ids(photo).is_empty() {
+                return Err(EngineError::msg("This photo has no page to split."));
+            }
             self.split_pending(photo)?;
             self.notify("Finding a book's spine isn't ready yet (A30): the photo is cut down the middle.", false);
             Ok(())
@@ -504,9 +526,40 @@ impl Engine {
         if item.size == (0, 0) {
             return Err(EngineError::msg("This photo is still being read."));
         }
-        let ids = self.pending_ids(photo);
+        let mut ids = self.pending_ids(photo);
         if ids.is_empty() {
-            return Err(EngineError::msg("This photo has no page to correct."));
+            // The photo has no page yet: one is cut from the outline that was found.
+            let corners = self
+                .detected
+                .get(&photo)
+                .map(|d| d.corners)
+                .or_else(|| self.fallback_corners(photo))
+                .ok_or_else(|| EngineError::msg("This photo is still being read."))?;
+            let origin = self.detected.get(&photo).map_or(CornerOrigin::NotFound, |d| d.origin);
+            let sides: [SideShape; 4] = self
+                .detected
+                .get(&photo)
+                .map_or_else(|| [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight], |d| d.sides.clone());
+            let page = Page {
+                id: self.session.allocate_page_id(),
+                photo,
+                source: item.source.clone(),
+                corners,
+                corners_from: origin,
+                sides,
+                spread: None,
+                flatten: FlattenMode::Off,
+                sheet: None,
+                proportions: None,
+                page_size_mm: None,
+                quarter_turns: 0,
+                turns_from: TurnOrigin::Auto,
+                look: self.last_look,
+                strength: self.last_look.default_strength().unwrap_or(0),
+                text: None,
+            };
+            self.session.pending_mut().push(page);
+            ids = self.pending_ids(photo);
         }
         if self.session.file().pages.len() + self.session.pending().len() > MAX_PAGES {
             return Err(EngineError::msg(format!("A session holds at most {MAX_PAGES} pages.")));
@@ -708,6 +761,12 @@ impl Engine {
         }
         if path.trim().is_empty() {
             return Err(EngineError::msg("Choose where to save the PDF."));
+        }
+        // The page on Screen 3 goes into the tray first (§4.4).
+        if let Screen::Enhance(current) = self.screen
+            && !self.session.in_tray(current)
+        {
+            self.page_add(current)?;
         }
         let added = self.session.file().pages.len();
         if added == 0 {

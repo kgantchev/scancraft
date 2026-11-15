@@ -615,6 +615,7 @@ pub fn export_pdf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scancraft_core::recipe::FlattenMode;
 
     #[test]
     fn the_output_density_follows_the_quality_and_look() {
@@ -639,6 +640,81 @@ mod tests {
         // A tall image on Letter takes the portrait orientation.
         let (page, _) = page_layout((100.0, 300.0), PageSizeOption::UsLetter);
         assert_eq!(page, (612.0, 792.0));
+    }
+
+    /// A drawn scene: a bright sheet on a dark desk, seen at an angle.
+    fn scene() -> (Rgb8, PhotoItem, Page) {
+        let w = 400;
+        let h = 300;
+        let mut data: Vec<[u8; 3]> = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let on_sheet = (70..330).contains(&x) && (50..250).contains(&y);
+                let p: [u8; 3] = if on_sheet {
+                    let text = (x / 17 + y / 23) % 5 == 0;
+                    if text { [40, 40, 40] } else { [238, 236, 230] }
+                } else {
+                    [32, 30, 28]
+                };
+                data.push(p);
+            }
+        }
+        let photo = Plane::from_vec(w, h, data).unwrap();
+        let corners = Quad([Point::new(70.0, 50.0), Point::new(330.0, 50.0), Point::new(330.0, 250.0), Point::new(70.0, 250.0)]);
+        let item = PhotoItem {
+            id: scancraft_core::recipe::PhotoId(1),
+            source: SourceId("test".to_string()),
+            name: "scene".to_string(),
+            origin: ImportOrigin::File,
+            size: (w, h),
+            focal: FocalInput::default(),
+        };
+        let page = Page {
+            id: scancraft_core::recipe::PageId(1),
+            photo: item.id,
+            source: item.source.clone(),
+            corners,
+            corners_from: CornerOrigin::Manual,
+            sides: [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight],
+            spread: None,
+            flatten: FlattenMode::Off,
+            sheet: None,
+            proportions: None,
+            page_size_mm: None,
+            quarter_turns: 0,
+            turns_from: scancraft_core::recipe::TurnOrigin::Manual,
+            look: Look::Original,
+            strength: 0,
+            text: None,
+        };
+        (photo, item, page)
+    }
+
+    #[test]
+    fn the_look_preview_matches_the_final_page_within_six_grey_levels() {
+        let dir = std::env::temp_dir().join(format!("scancraft-preview-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let cache = Arc::new(crate::cache::Cache::unchecked(dir.clone()));
+        let ctx = Ctx { cache, sources: dir.clone(), services: crate::Services::default(), settings: crate::settings::Settings::default() };
+        let (photo, item, page) = scene();
+        let token = CancellationToken::new();
+        let (preview, _) = render_small(&ctx, &photo, &item, &page, PREVIEW_LONG_SIDE, &token).unwrap();
+        let geometry = page_geometry(&page, (photo.width(), photo.height()), item.focal, &ctx.settings).unwrap();
+        let size = final_size(&geometry, page.quarter_turns, 300, page.look);
+        let (final_page, _) = render_page(&ctx, &photo, &item, &page, RenderSpec { size, dpi: 300.0, preview: false }, &token).unwrap();
+        let full = final_page.to_rgb8().unwrap();
+        let same = fit_long_side(full.width(), full.height(), preview.width().max(preview.height()));
+        let small = area_downscale_rgb8(&full, same.0, same.1).unwrap();
+        // The mean difference over the page, in grey levels (§6.5).
+        let mut total = 0f64;
+        let mut count = 0f64;
+        for (a, b) in preview.data().iter().zip(small.data().iter()) {
+            let (ga, gb) = (f64::from(a[0]) + f64::from(a[1]) + f64::from(a[2]), f64::from(b[0]) + f64::from(b[1]) + f64::from(b[2]));
+            total += (ga - gb).abs() / 3.0;
+            count += 1.0;
+        }
+        let mean = total / count;
+        assert!(mean < 6.0, "the preview differs from the final page by {mean} grey levels");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

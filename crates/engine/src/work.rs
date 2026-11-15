@@ -180,7 +180,8 @@ impl Engine {
 
     /// Starts text recognition for a page in the background (lowest priority).
     pub(crate) fn submit_recognition(&mut self, page: &Page) {
-        if self.services.recognizer.is_none() || !self.session.file().export.searchable {
+        // The text is read whether or not the last export asked for it: a later export may.
+        if self.services.recognizer.is_none() {
             return;
         }
         let Some(item) = self.session.photo(page.photo).cloned() else { return };
@@ -245,7 +246,7 @@ impl Engine {
             file.pages.iter().filter_map(|p| file.photos.iter().find(|i| i.id == p.photo).map(|i| (i.clone(), p.clone()))).collect();
         let options = file.export.clone();
         let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Scan").to_string();
-        let token = self.fresh_token(Target::Photo(PhotoId(u64::MAX)));
+        let token = self.fresh_token(Target::Export);
         let ctx = self.ctx();
         let meta = JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() };
         self.submit_job(
@@ -507,6 +508,12 @@ impl Engine {
             self.notify(n, false);
         }
         true
+    }
+
+    /// The corners a photo starts with when no page was found: 3% inside its edges.
+    pub(crate) fn fallback_corners(&self, photo: PhotoId) -> Option<scancraft_core::geom::Quad> {
+        let item = self.session.photo(photo)?;
+        (item.size != (0, 0)).then(|| crate::crop::not_found_corners(item.size))
     }
 
     /// The geometry of a page, for the view and the commands: `None` when the photo isn't decoded yet.

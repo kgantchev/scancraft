@@ -226,9 +226,16 @@ fn a_drag_is_one_undo_step_and_a_pause_starts_a_new_one() {
     }
     engine.dispatch(Command::EditUndo).unwrap();
     assert_eq!(without_redo(engine.view()), start);
-    assert!(!engine.view().can_undo);
-    // A pause longer than the window starts a new step.
+    // The import is a step of its own: undoing it takes the photo away, and redoing brings it back.
+    assert!(engine.view().can_undo);
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert!(engine.session().file().photos.is_empty());
+    assert_eq!(engine.view().screen, Screen::Import);
     engine.dispatch(Command::EditRedo).unwrap();
+    assert_eq!(engine.session().file().photos.len(), 1);
+    engine.dispatch(Command::EditRedo).unwrap();
+    assert_eq!(engine.view().crop.unwrap().outlines[0].corners.0[2], Point::new(159.0, 90.0));
+    // A pause longer than the window starts a new step.
     clock.fetch_add(2_000, Ordering::Relaxed);
     engine.dispatch(Command::CropSetCorner { page, corner: Corner::BottomRight, x: 150.0, y: 90.0 }).unwrap();
     engine.dispatch(Command::EditUndo).unwrap();
@@ -511,6 +518,57 @@ fn a_pdf_is_written_and_the_session_is_marked_exported() {
     let crop = second.view().crop.expect("the PDF's page is on Screen 2");
     assert!(matches!(crop.outlines[0].corners_from, CornerOrigin::FullImage));
     assert!(second.dispatch(Command::CropSetFlatten { page: crop.outlines[0].page, mode: FlattenMode::On }).is_err());
+}
+
+#[test]
+fn a_pdf_gives_one_item_for_each_of_its_pages() {
+    let dir = TempDir::new("pdfpages");
+    // Two pages, written with the same writer the export uses.
+    let mut picture = Vec::new();
+    for y in 0..40 {
+        for x in 0..30 {
+            picture.push([200 - (x * 3) as u8, 210, 220 - (y * 2) as u8]);
+        }
+    }
+    let image = scancraft_core::image::Plane::from_vec(30, 40, picture).unwrap();
+    let encoded = scancraft_io::encode::encode(&scancraft_io::encode::PageImage::Colour(image), scancraft_core::recipe::Quality::Small).unwrap();
+    let pages: Vec<scancraft_io::pdf_write::PdfPage> = (0..2)
+        .map(|_| scancraft_io::pdf_write::PdfPage {
+            image: encoded.clone(),
+            size_pt: (595.0, 842.0),
+            image_rect_pt: [0.0, 0.0, 595.0, 842.0],
+            text: None,
+        })
+        .collect();
+    let path = dir.join("two.pdf");
+    scancraft_io::pdf_write::write_pdf(&pages, &scancraft_io::pdf_write::DocInfo { title: "two".to_string(), producer: "test".to_string() }, &path)
+        .unwrap();
+    let mut engine = open(&dir, services(desk_quad()));
+    engine.dispatch(Command::ImportAdd { paths: vec![path.to_string_lossy().into_owned()] }).unwrap();
+    settle(&mut engine);
+    let photos = &engine.session().file().photos;
+    assert_eq!(photos.len(), 2);
+    assert_eq!(photos[0].name, "two.pdf, page 1");
+    assert_eq!(photos[1].name, "two.pdf, page 2");
+    // A PDF page's default is Use Full Image, and flattening isn't offered for it.
+    let crop = engine.view().crop.expect("Screen 2");
+    assert!(matches!(crop.outlines[0].corners_from, CornerOrigin::FullImage));
+}
+
+#[test]
+fn exporting_from_screen_three_adds_the_page_being_looked_at_first() {
+    let dir = TempDir::new("export3");
+    let mut engine = engine_with_photo(&dir);
+    let page = to_screen_three(&mut engine);
+    engine.dispatch(Command::PageSetLook { page, look: Look::Original }).unwrap();
+    // The page is still on Screen 3, not in the tray.
+    assert!(engine.view().tray.is_empty());
+    let out = dir.join("from3.pdf");
+    engine.dispatch(Command::ExportPdf { path: out.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
+    settle(&mut engine);
+    assert_eq!(engine.view().tray.len(), 1);
+    assert_eq!(engine.view().tray[0].page, page);
+    assert!(out.is_file());
 }
 
 #[test]

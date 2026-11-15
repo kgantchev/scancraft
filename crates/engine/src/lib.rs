@@ -82,6 +82,8 @@ pub(crate) enum Target {
     Photo(PhotoId),
     /// The live preview of a page: a newer request replaces the one before it.
     Preview(PageId),
+    /// The export.
+    Export,
 }
 
 /// A photo's progress through detection.
