@@ -191,10 +191,12 @@ impl Profile {
         let mut q_knot = vec![0.0; KNOTS * KNOTS];
         for (k, spacing) in h.iter().enumerate() {
             let w = spacing / 3.0;
-            for (p, q) in [(k, k), (k, k + 1), (k + 1, k + 1)] {
+            // The cross term M_k·M_{k+1} is split over both halves, so the matrix is symmetric:
+            // the solver needs Q's gradient (Q y) and second derivative (Q) to be right.
+            for (p, q, share) in [(k, k, 1.0), (k, k + 1, 0.5), (k + 1, k, 0.5), (k + 1, k + 1, 1.0)] {
                 let index = p * KNOTS + q;
                 if let Some(slot) = q_knot.get_mut(index) {
-                    *slot += w;
+                    *slot += w * share;
                 }
             }
         }
@@ -314,6 +316,17 @@ mod tests {
         for t in [0.05, 0.2, 0.5, 0.77, 0.95] {
             let numerical = (profile.value(&y, t + h) - profile.value(&y, t - h)) / (2.0 * h);
             assert!((profile.derivative(&y, t) - numerical).abs() < 1e-6, "at {t}");
+        }
+    }
+
+    #[test]
+    fn the_bending_matrix_is_symmetric() {
+        let profile = Profile::new();
+        let q = profile.bending_quadratic();
+        for (i, row) in q.iter().enumerate() {
+            for (j, value) in row.iter().enumerate() {
+                assert!((value - q[j][i]).abs() <= 1e-9 * value.abs().max(1.0), "{i} {j}");
+            }
         }
     }
 }

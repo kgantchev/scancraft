@@ -203,7 +203,7 @@ impl LmSystem {
                     let outer = v[p] * v[q] / c;
                     let index = column * n + row.columns[q].0;
                     if let Some(slot) = matrix.get_mut(index) {
-                        *slot += -inner + outer;
+                        *slot += inner - outer;
                     }
                 }
             }
