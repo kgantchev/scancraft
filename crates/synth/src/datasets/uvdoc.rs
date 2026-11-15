@@ -296,11 +296,20 @@ mod tests {
         out.extend((padded.len() as u16).to_le_bytes());
         out.extend(padded);
         let value = |j: usize, i: usize, c: usize| if c == 0 { g[j][i].x } else { g[j][i].y };
-        let order: Vec<(usize, usize, usize)> = if fortran {
-            (0..2).flat_map(|c| (0..cols).flat_map(move |i| (0..rows).map(move |j| (j, i, c)))).collect()
+        let mut order: Vec<(usize, usize, usize)> = Vec::new();
+        if fortran {
+            for c in 0..2 {
+                for i in 0..cols {
+                    order.extend((0..rows).map(|j| (j, i, c)));
+                }
+            }
         } else {
-            (0..rows).flat_map(|j| (0..cols).flat_map(move |i| (0..2).map(move |c| (j, i, c)))).collect()
-        };
+            for j in 0..rows {
+                for i in 0..cols {
+                    order.extend((0..2).map(|c| (j, i, c)));
+                }
+            }
+        }
         for (j, i, c) in order {
             if descr == "<f8" { out.extend(value(j, i, c).to_le_bytes()) } else { out.extend((value(j, i, c) as f32).to_le_bytes()) }
         }
@@ -315,6 +324,7 @@ mod tests {
         out
     }
 
+    #[allow(clippy::needless_range_loop)]
     /// A MATLAB v5 file with one double array `name` of shape (rows, cols, 2), column-major.
     fn mat(g: &Grid, name: &str, compress: bool) -> Vec<u8> {
         let (rows, cols) = (g.len(), g[0].len());

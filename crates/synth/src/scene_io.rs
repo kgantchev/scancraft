@@ -64,7 +64,7 @@ pub fn read_photo(path: &Path) -> Result<Rgb8, CoreError> {
     let img = image::open(path).map_err(|e| io_error(path, e))?.to_rgb8();
     let (w, h) = img.dimensions();
     let (pixels, _) = img.as_raw().as_chunks::<3>();
-    Ok(Plane::from_vec(w, h, pixels.to_vec())?)
+    Plane::from_vec(w, h, pixels.to_vec())
 }
 
 /// Reads an ink mask PNG (any grey above the middle is ink).

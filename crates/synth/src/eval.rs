@@ -126,7 +126,7 @@ pub fn grid_error(found: &[Vec<[f64; 2]>], truth: &[Vec<Point>], diagonal: f64) 
     if truth.len() < 2 || !same {
         return Err(CoreError::Scene("the found grid does not match the truth's rows and columns".into()));
     }
-    if !(diagonal > 0.0) {
+    if diagonal.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err(CoreError::Scene("the page has no diagonal".into()));
     }
     let mut errors = Vec::new();

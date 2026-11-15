@@ -133,13 +133,13 @@ pub fn jpeg_round_trip(photo: &Rgb8) -> Result<Rgb8, CoreError> {
     let image = craft_image_codecs::decode(&bytes).map_err(|e| CoreError::Scene(format!("JPEG damage: {e}")))?;
     let data = image.as_u8().ok_or_else(|| CoreError::Scene("JPEG damage: unexpected sample type".into()))?;
     let (pixels, _) = data.as_chunks::<3>();
-    Ok(Rgb8::from_vec(w, h, pixels.to_vec())?)
+    Rgb8::from_vec(w, h, pixels.to_vec())
 }
 
 /// Rounds a float photo (0–255) to 8 bits.
 pub fn quantize(photo: &[[f32; 3]], width: u32, height: u32) -> Result<Rgb8, CoreError> {
     let data = photo.iter().map(|p| p.map(|v| if v.is_finite() { (v + 0.5).clamp(0.0, 255.0) as u8 } else { 0 })).collect();
-    Ok(Rgb8::from_vec(width, height, data)?)
+    Rgb8::from_vec(width, height, data)
 }
 
 #[cfg(test)]

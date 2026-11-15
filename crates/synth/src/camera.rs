@@ -106,7 +106,7 @@ pub fn place(cam: &SceneCamera, p: &Placement, surface: &dyn Fn(f64, f64) -> [f6
         let pose = Pose::new(r, centre, [ox, oy, d]);
         let (lo, hi) = bounds(&pose, cam, surface)?;
         let ratio = ((hi.x - lo.x) / cam.width).max((hi.y - lo.y) / cam.height);
-        if !(ratio > 0.0) {
+        if ratio.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return None;
         }
         d *= ratio / p.coverage;

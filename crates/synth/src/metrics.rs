@@ -115,7 +115,7 @@ pub fn flattening_error(map: &dyn PageMap, truth: &SceneTruth) -> Result<f64, Co
         }
     }
     let diagonal = page_diagonal(&truth.corners);
-    if !(diagonal > 0.0) {
+    if diagonal.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err(scene_error("the page has no diagonal"));
     }
     percentile(&errors, 0.95).map(|p| p / diagonal).ok_or_else(|| scene_error("no grid points"))
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn the_ratio_error_is_relative() {
-        assert!((ratio_error(0.75, 0.7071).unwrap() - 0.0606).abs() < 1e-3);
+        assert!((ratio_error(0.75, std::f64::consts::FRAC_1_SQRT_2).unwrap() - 0.0606).abs() < 1e-3);
         assert!(ratio_error(1.0, 0.0).is_err());
         assert!(ratio_error(f64::NAN, 1.0).is_err());
     }

@@ -84,7 +84,7 @@ fn build_triangles(cam: &SceneCamera, pose: &Pose, sheet: &Sheet, texture: &Text
             for corners in [[(i, j), (i + 1, j), (i, j + 1)], [(i + 1, j), (i + 1, j + 1), (i, j + 1)]] {
                 let [Some(a), Some(b), Some(c)] = corners.map(|(x, y)| at(x, y)) else { continue };
                 let area = ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() / 2.0;
-                if !(area > 1e-9) {
+                if area.partial_cmp(&1e-9) != Some(std::cmp::Ordering::Greater) {
                     continue;
                 }
                 // Page area in texels over screen area in subsample areas gives the mip level.

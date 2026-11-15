@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(good.len(), 64);
         let manifest = format!(
             r#"{{"photos":[{},{},{},{},{}]}}"#,
-            entry("a.jpg", &good, "dark desk", r#","ratio":0.7071,"text_file":"a.txt","spine":[[5,6],[7,8]]"#),
+            entry("a.jpg", &good, "dark desk", r#","ratio":0.7075,"text_file":"a.txt","spine":[[5,6],[7,8]]"#),
             entry("a.jpg", &"0".repeat(64), "dark desk", ""),
             entry("a.jpg", &good, "not a category", ""),
             entry("../a.jpg", &good, "wood", ""),
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(s.text.as_deref(), Some("hello world"));
         assert_eq!(s.spine.unwrap()[1], Point::new(7.0, 8.0));
         assert_eq!(s.corners.unwrap().br(), Point::new(3.0, 4.0));
-        assert!((s.ratio.unwrap() - 0.7071).abs() < 1e-12);
+        assert!((s.ratio.unwrap() - 0.7075).abs() < 1e-12);
         let _ = std::fs::remove_dir_all(dir);
     }
 

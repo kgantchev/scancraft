@@ -59,7 +59,7 @@ mod tests {
         let s = &set.samples[0];
         assert!(s.grid.is_some() && s.corners.is_some() && s.text.as_deref().is_some_and(|t| t.lines().count() > 20));
         assert!(s.ink.is_some() && s.image.is_file());
-        assert_eq!(s.size().unwrap().0 > 0, true);
+        assert!(s.size().unwrap().0 > 0);
         // A broken truth file is skipped with a reason.
         std::fs::write(dir.join("scene_00009.json"), "{ not json").unwrap();
         let set = load(&dir).unwrap();

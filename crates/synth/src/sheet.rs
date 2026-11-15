@@ -7,7 +7,6 @@
 
 use scancraft_core::determinism::Xorshift64Star;
 use scancraft_core::recipe::BendMode;
-use std::f64::consts::PI;
 
 /// A4 and A5 in points.
 pub const A4: (f64, f64) = (595.28, 841.89);
@@ -182,9 +181,6 @@ impl Sheet {
     }
 }
 
-/// Degrees in a full turn, kept here for the docs' sake.
-pub const FULL_TURN: f64 = 2.0 * PI;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +208,7 @@ mod tests {
                 // The profile's length by the point table equals the arclength, and the chord is shorter.
                 let steps = 4000;
                 let mut length = 0.0;
-                let mut last = if s.mode == BendMode::Across { s.point(0.0, 0.0) } else { s.point(0.0, 0.0) };
+                let mut last = s.point(0.0, 0.0);
                 for i in 1..=steps {
                     let t = f64::from(i) / f64::from(steps);
                     let p = if s.mode == BendMode::Across { s.point(t, 0.0) } else { s.point(0.0, t) };
