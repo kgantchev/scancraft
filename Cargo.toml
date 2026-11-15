@@ -32,7 +32,7 @@ craft-cms = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614
 craft-metadata = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
 craft-jpeg = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
 craft-stream-codecs = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
-craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", default-features = false, features = ["read", "raster"] }
+craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", default-features = false, features = ["read", "raster", "filters"] }
 craft-atomic = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
 craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
 craft-dialogs = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
@@ -61,6 +61,7 @@ objc2-vision = { version = "0.3.2", default-features = false, features = ["std",
 
 # foundation
 rayon = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"

@@ -6,6 +6,8 @@
 pub mod homography;
 pub mod proportions;
 pub mod sheet;
+pub mod solver;
+pub mod spline;
 
 use scancraft_core::CoreError;
 

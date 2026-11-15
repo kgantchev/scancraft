@@ -808,7 +808,7 @@ When the native density exceeds the output DPI by more than 2%, the warped page 
 
 Output DPI: Original, Color Document and Grayscale use the smaller of the preset's DPI and the native density; Black & White always uses the preset's DPI (A18).
 
-**Tests:** a constant image stays constant; a zone plate shows no visible aliasing; a grating at 0.4 cycles per output pixel keeps at least 90% of its contrast.
+**Tests:** a constant image stays constant; a zone plate shows no visible aliasing; a grating at 0.3 cycles per output pixel keeps at least 90% of its contrast, and one at 0.4 cycles keeps at least 70% (the kernel's own response is 0.99 at 0.3 cycles and 0.82 at 0.4, so no Lanczos-3 filter could keep 90% at 0.4).
 
 ### A15. Upright
 
@@ -948,8 +948,8 @@ Steps on macOS:
 
 1. Map page pixels (x right, y down) to PDF points (x right, y up): to_user(x, y) = [x · W_pt/W_px, H_pt − y · H_pt/H_px].
 2. Call `PlacedWord::place(&word, to_user)` for every word.
-3. `text_layer(&placed, &plan)` returns the content stream: `/OCR BMC q BT 3 Tr … ET Q EMC`. Each word gets its own text matrix, which stretches the word's natural width to its box, with a size taken from the height of its ink. The `q … Q` pair stops rendering mode 3 from leaking into anything drawn later (pdfcraft #3033).
-4. Fonts: words whose characters all exist in the WinAnsi encoding use standard Helvetica. Other words use Type3 fonts with empty glyphs and Unicode mappings (ToUnicode), so text in any script copies out correctly without embedding a real font.
+3. `text_layer(&placed, &plan)` returns the content stream: `/OCR BMC q BT 3 Tr … ET Q EMC`. Each word gets its own text matrix, which stretches the word's natural width to its box, with a size that makes the font's ascender-to-descender span (0.93 em) as tall as the box. PdfCraft sized a word by the height of its ink, but a viewer or `pdftotext` takes a word's height from the font's ascender and descender, so for a word such as "sun" the highlight and the extracted box came out 1.8 times too tall and could not reach IoU 0.8. The `q … Q` pair stops rendering mode 3 from leaking into anything drawn later (pdfcraft #3033).
+4. Fonts: words whose characters all exist in the WinAnsi encoding use standard Helvetica. Other words use Type3 fonts with empty glyphs, a fixed advance of half an em, a font descriptor with the same ascender and descender, and Unicode mappings (ToUnicode), so text in any script copies out correctly without embedding a real font.
 
 **Tests:** text extracted from the PDF (Poppler's `pdftotext -bbox`) contains at least 99% of the recognised words, in order, each within its word box at IoU ≥ 0.8; a page renders pixel-identically with and without the layer; no `Tr`, `Tf` or `Tm` sits outside a `q … Q` pair.
 

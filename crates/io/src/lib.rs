@@ -5,10 +5,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod encode;
+mod helvetica;
 pub mod import;
 pub mod pdf_import;
 pub mod pdf_write;
 pub mod text_layer;
+mod winansi;
 
 use scancraft_core::CoreError;
 use scancraft_raster::RasterError;
