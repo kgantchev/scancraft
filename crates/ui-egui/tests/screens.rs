@@ -666,13 +666,13 @@ fn the_canvas_fits_the_photo_with_32_points_of_padding() {
     let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
     let canvas = scancraft_ui_egui::canvas::Canvas::new(area, &picture(600, 450), (1200, 900));
     let inner = area.shrink(32.0);
-    assert!(inner.contains_rect(canvas.rect), "the photo {:?} is outside {:?}", canvas.rect, inner);
+    assert!(inner.expand(0.01).contains_rect(canvas.workspace), "the photo {:?} is outside {:?}", canvas.workspace, inner);
     // The photo touches one side of the padded area.
-    let touches = (canvas.rect.min.x - inner.min.x).abs() < 0.01
-        || (inner.max.x - canvas.rect.max.x).abs() < 0.01
-        || (canvas.rect.min.y - inner.min.y).abs() < 0.01
-        || (inner.max.y - canvas.rect.max.y).abs() < 0.01;
-    assert!(touches, "the photo {:?} fits inside {:?} without touching it", canvas.rect, inner);
+    let touches = (canvas.workspace.min.x - inner.min.x).abs() < 0.01
+        || (inner.max.x - canvas.workspace.max.x).abs() < 0.01
+        || (canvas.workspace.min.y - inner.min.y).abs() < 0.01
+        || (inner.max.y - canvas.workspace.max.y).abs() < 0.01;
+    assert!(touches, "the photo {:?} fits inside {:?} without touching it", canvas.workspace, inner);
 }
 
 #[test]
@@ -1112,4 +1112,16 @@ fn the_loupe_appears_after_a_keyboard_nudge() {
     let since = harness.state().0.loupe_since().expect("the loupe has no start");
     // The loupe shows for a second (§4.3).
     assert!((until - since - 1.0).abs() < 1e-9, "the loupe shows for {} seconds", until - since);
+}
+
+#[test]
+fn the_canvas_has_room_for_a_corner_outside_the_photo() {
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let canvas = scancraft_ui_egui::canvas::Canvas::new(area, &picture(600, 450), (1200, 900));
+    // The farthest a corner may go (15% beyond each edge) is still inside the workspace.
+    for (x, y) in [(-180.0, -135.0), (1380.0, -135.0), (1380.0, 1035.0), (-180.0, 1035.0)] {
+        let at = canvas.photo_to_canvas(scancraft_core::geom::Point::new(x, y));
+        assert!(canvas.workspace.expand(0.5).contains(at), "{at:?} is outside {:?}", canvas.workspace);
+        assert!(!canvas.rect.contains(at), "{at:?} should be outside the photo {:?}", canvas.rect);
+    }
 }

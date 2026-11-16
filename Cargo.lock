@@ -4060,12 +4060,14 @@ dependencies = [
  "craft-dialogs",
  "craft-menu",
  "craft-quit",
+ "craft-settings",
  "eframe",
  "egui",
  "scancraft-apple",
  "scancraft-core",
  "scancraft-engine",
  "scancraft-ui-egui",
+ "serde_json",
 ]
 
 [[package]]

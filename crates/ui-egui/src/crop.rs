@@ -35,7 +35,7 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     let canvas = Canvas::new(rect, &display, crop.photo_size);
     canvas::draw_canvas(ui, &canvas, crop, state, engine);
     for outline in &crop.outlines {
-        let painter = ui.painter_at(canvas.rect);
+        let painter = ui.painter_at(canvas.workspace);
         canvas::draw_outline(&painter, &canvas, outline);
     }
     for outline in &crop.outlines {

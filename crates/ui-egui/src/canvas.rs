@@ -20,12 +20,18 @@ use crate::theme;
 pub const PADDING: f32 = 32.0;
 /// The radius of the hit area of a corner, a bend handle or a spine end (§4.3).
 pub const HANDLE_HIT_RADIUS: f32 = 22.0;
+/// How far outside the photo a corner may be dragged, as a share of the photo's width or height.
+/// It matches the engine's limit, so the canvas always has room for every corner it can hold.
+pub const VIRTUAL_MARGIN: f32 = 0.15;
 
 /// Where the display copy is drawn, and how a photo pixel maps onto it.
 #[derive(Debug, Clone, Copy)]
 pub struct Canvas {
     /// The rectangle the display copy is drawn in, in points.
     pub rect: Rect,
+    /// The photo's rectangle with the virtual margin around it: where a corner can be dragged to
+    /// when the page's real corner lies outside the camera's view.
+    pub workspace: Rect,
     /// Points per display-copy pixel.
     pub scale: f32,
     /// Display-copy pixels per full-resolution photo pixel: the display copy's downscale.
@@ -42,13 +48,16 @@ impl Canvas {
         let inner = area.shrink(PADDING);
         let (mut scale, mut shown) = (0.0, Vec2::ZERO);
         if dw > 0.0 && dh > 0.0 && inner.width() > 0.0 && inner.height() > 0.0 {
-            scale = (inner.width() / dw).min(inner.height() / dh);
+            // The margin is part of the fit, so the photo keeps its size while a corner leaves it.
+            let wide = 1.0 + 2.0 * VIRTUAL_MARGIN;
+            scale = (inner.width() / (dw * wide)).min(inner.height() / (dh * wide));
             shown = Vec2::new(dw * scale, dh * scale);
         }
         let rect = Rect::from_min_size(inner.min + (inner.size() - shown) / 2.0, shown);
+        let workspace = rect.expand2(Vec2::new(rect.width() * VIRTUAL_MARGIN, rect.height() * VIRTUAL_MARGIN));
         let photo_long = photo_size.0.max(photo_size.1);
         let k = if photo_long > 0 { f64::from(display.width().max(display.height())) / f64::from(photo_long) } else { 1.0 };
-        Canvas { rect, scale, k, photo_size }
+        Canvas { rect, workspace, scale, k, photo_size }
     }
 
     /// A full-resolution photo position in canvas points.
@@ -372,7 +381,8 @@ fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
 /// Draws the canvas: the background, the display copy, the scrim outside the outline and the
 /// outline itself.
 pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) {
-    theme::canvas_background(ui, canvas.rect.expand(PADDING));
+    theme::canvas_background(ui, canvas.workspace.expand(PADDING));
+    draw_virtual_area(ui, canvas, crop);
     let Some(texture) = state.texture(ui, engine, scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo), egui::TextureOptions::LINEAR) else {
         return;
     };
@@ -384,6 +394,35 @@ pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiStat
     painter.rect_filled(canvas.rect, 0.0, theme::SCRIM);
     for outline in &crop.outlines {
         draw_photo_inside(&painter, canvas, outline, id);
+    }
+}
+
+/// Draws the room around the photo, where a corner can be put when the page's real corner is out
+/// of the camera's view: a lighter field, the photo's own edge, and the part of the page outline
+/// that lies out there, tinted, so the "virtual" page reads as a continuation of the photo.
+fn draw_virtual_area(ui: &Ui, canvas: &Canvas, crop: &CropView) {
+    let painter = ui.painter_at(canvas.workspace);
+    painter.rect_filled(canvas.workspace, 0.0, Color32::from_white_alpha(10));
+    // Dashed edges mark where the camera's view ends.
+    let edge = Stroke::new(1.0, Color32::from_white_alpha(90));
+    let corners = [canvas.rect.left_top(), canvas.rect.right_top(), canvas.rect.right_bottom(), canvas.rect.left_bottom(), canvas.rect.left_top()];
+    painter.extend(Shape::dashed_line(&corners, edge, 6.0, 4.0));
+    for outline in &crop.outlines {
+        let polygon: Vec<Pos2> = outline_polygon(outline).iter().map(|p| canvas.photo_to_canvas(*p)).collect();
+        if polygon.len() < 3 {
+            continue;
+        }
+        let mut mesh = Mesh::default();
+        let tint = Color32::from_rgba_unmultiplied(theme::SCAN_CYAN.r(), theme::SCAN_CYAN.g(), theme::SCAN_CYAN.b(), 40);
+        for p in &polygon {
+            mesh.colored_vertex(*p, tint);
+        }
+        for triangle in triangulate(&polygon) {
+            mesh.add_triangle(triangle[0] as u32, triangle[1] as u32, triangle[2] as u32);
+        }
+        if !mesh.indices.is_empty() {
+            painter.add(Shape::mesh(mesh));
+        }
     }
 }
 
@@ -469,7 +508,7 @@ fn draw_corner(
     engine: &mut dyn EngineApi,
     now: f64,
 ) {
-    let painter = ui.painter_at(canvas.rect);
+    let painter = ui.painter_at(canvas.workspace);
     painter.circle_filled(position, theme::CORNER_RADIUS, theme::HANDLE);
     painter.circle_stroke(position, theme::CORNER_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
     let id = ui.make_persistent_id(("scancraft.corner", page, corner.index()));
@@ -512,7 +551,7 @@ fn side_double_click(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side
 fn draw_bend_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi, now: f64) {
     let handles = bend_handles(outline, side);
     let Some(handle) = handles.get(BEND_VERTEX) else { return };
-    let painter = ui.painter_at(canvas.rect);
+    let painter = ui.painter_at(canvas.workspace);
     let position = canvas.photo_to_canvas(*handle);
     painter.circle_filled(position, theme::BEND_RADIUS, theme::HANDLE);
     painter.circle_stroke(position, theme::BEND_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
@@ -548,7 +587,7 @@ pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Comman
 pub fn draw_spine(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) {
     let Some(spine) = crop.spine else { return };
     let now = ui.input(|i| i.time);
-    let painter = ui.painter_at(canvas.rect);
+    let painter = ui.painter_at(canvas.workspace);
     let a = canvas.photo_to_canvas(spine[0]);
     let b = canvas.photo_to_canvas(spine[1]);
     for shape in Shape::dashed_line(&[a, b], Stroke::new(theme::OUTLINE_WIDTH, theme::SCAN_CYAN), 6.0, 4.0) {
