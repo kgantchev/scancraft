@@ -16,19 +16,19 @@ const USAGE_ERROR: u8 = 64;
 pub const SYNTH_USAGE: &str = "usage: scancraft-cli synth [--curved] --count N --seed S --out DIR";
 pub const EVAL_USAGE: &str = "usage: scancraft-cli eval --set smartdoc2015|uvdoc|reference|synthetic --root DIR --report FILE [--found FILE]";
 
-fn usage(message: &str, usage: &str) -> ExitCode {
+pub(crate) fn usage(message: &str, usage: &str) -> ExitCode {
     eprintln!("scancraft-cli: {message}\n{usage}");
     ExitCode::from(USAGE_ERROR)
 }
 
 /// The flags of one command: `--name value` pairs and bare switches, each at most once.
-struct Flags {
-    values: Vec<(String, String)>,
-    switches: Vec<String>,
+pub(crate) struct Flags {
+    pub(crate) values: Vec<(String, String)>,
+    pub(crate) switches: Vec<String>,
 }
 
 /// Parses `args` against the flags that take a value and the switches that don't.
-fn parse_flags(args: &[String], with_value: &[&str], switches: &[&str]) -> Result<Flags, String> {
+pub(crate) fn parse_flags(args: &[String], with_value: &[&str], switches: &[&str]) -> Result<Flags, String> {
     let mut flags = Flags { values: Vec::new(), switches: Vec::new() };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -52,11 +52,11 @@ fn parse_flags(args: &[String], with_value: &[&str], switches: &[&str]) -> Resul
 }
 
 impl Flags {
-    fn value(&self, name: &str) -> Option<&str> {
+    pub(crate) fn value(&self, name: &str) -> Option<&str> {
         self.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 
-    fn required(&self, name: &str) -> Result<&str, String> {
+    pub(crate) fn required(&self, name: &str) -> Result<&str, String> {
         self.value(name).ok_or_else(|| format!("{name} is required"))
     }
 }

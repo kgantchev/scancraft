@@ -4090,10 +4090,13 @@ dependencies = [
 name = "scancraft-cli"
 version = "0.1.0"
 dependencies = [
+ "craft-settings",
+ "image",
  "ocrs",
  "rten",
  "scancraft-core",
  "scancraft-engine",
+ "scancraft-geom",
  "scancraft-synth",
  "serde_json",
 ]

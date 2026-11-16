@@ -151,7 +151,7 @@ fn a_job_that_cannot_run_exits_one_with_a_message() {
     let out = run(&["synth", "--count", "1", "--seed", "1", "--out", file.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
     let _ = std::fs::remove_file(file);
-    // The other subcommands still say they are not ready, and `commands` still lists the ids.
-    assert_eq!(run(&["detect", "x.jpg"]).status.code(), Some(2));
+    // The pipeline's subcommands fail the same way on a file that is not there (tests/cli.rs has the rest).
+    assert_eq!(run(&["detect", "x.jpg"]).status.code(), Some(1));
     assert!(run(&["commands"]).status.success());
 }
