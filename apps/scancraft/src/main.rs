@@ -220,11 +220,18 @@ fn services() -> Services {
     }
 }
 
+/// The app icon at 256 px, with a transparent margin outside its rounded corners. It sets the Dock
+/// and window icon when the app runs unbundled; the packaged app takes `assets/ScanCraft.icns`.
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/scancraft-256.png");
+
 fn main() -> ExitCode {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_min_inner_size([860.0, 600.0]),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_min_inner_size([860.0, 600.0]);
+    match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        // A missing icon is not worth refusing to start for.
+        Err(e) => eprintln!("ScanCraft couldn't read its icon: {e}"),
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     let engine = Engine::new(std::env::temp_dir().join("scancraft-session"), services());
     let result = eframe::run_native(
         "ScanCraft",
@@ -246,5 +253,19 @@ fn main() -> ExitCode {
             eprintln!("ScanCraft couldn't start: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_icon_decodes_and_keeps_its_transparent_corners() {
+        let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).unwrap();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        let alpha = |x: u32, y: u32| icon.rgba[((y * icon.width + x) * 4 + 3) as usize];
+        assert_eq!(alpha(1, 1), 0, "the corner outside the rounded square is clear");
+        assert_eq!(alpha(128, 128), 255, "the middle is solid");
     }
 }

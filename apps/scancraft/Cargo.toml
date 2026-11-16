@@ -23,3 +23,7 @@ chrono = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scancraft-apple = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+craft-settings = { workspace = true }
