@@ -191,6 +191,16 @@ pub fn detect_photo(ctx: &Ctx, item: &PhotoItem, token: &CancellationToken) -> R
 
 // ---- the display copy and the loupe ----
 
+/// A small picture of a whole photo, its long side at most `long_side` px (A3), for the strip of
+/// photos on Screen 2.
+pub fn thumbnail(photo: &Rgb8, long_side: u32) -> Result<Rgb8, EngineError> {
+    let (w, h) = fit_long_side(photo.width(), photo.height(), long_side);
+    if (w, h) == (photo.width(), photo.height()) {
+        return Ok(photo.clone());
+    }
+    Ok(area_downscale_rgb8(photo, w, h)?)
+}
+
 /// Screen 2's display copy: the photo with its long side at most 3072 px (A3).
 pub fn display_copy(photo: &Rgb8) -> Result<Rgb8, EngineError> {
     let (w, h) = fit_long_side(photo.width(), photo.height(), DISPLAY_LONG_SIDE);

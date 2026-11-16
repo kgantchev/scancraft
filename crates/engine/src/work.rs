@@ -6,7 +6,7 @@ use crate::flatten::{COULD_NOT_FLATTEN, FlattenResult, flatten_page};
 use crate::jobs::{CancellationToken, Job, JobDone, JobMeta, JobPriority};
 use crate::pipeline::{
     Ctx, DetectedPhoto, ExportReport, FILTER_THUMB_LONG_SIDE, PREVIEW_LONG_SIDE, TRAY_THUMB_LONG_SIDE, crop_square, detect_photo, display_copy,
-    export_pdf, load_photo, page_geometry, photo_key, recognize_page, render_small, unfinished_note,
+    export_pdf, load_photo, page_geometry, photo_key, recognize_page, render_small, thumbnail, unfinished_note,
 };
 use crate::{Detected, Engine, PhotoStatus, Target};
 use scancraft_core::engine_api::{ImageKey, LoupeCrop, Screen};
@@ -123,6 +123,7 @@ impl Engine {
                 let loaded = load_photo(&ctx, &item.source, &item.origin, token)?;
                 let (image, notes) = match &page {
                     Some(page) => render_small(&ctx, &loaded.image, &item, page, long_side, token)?,
+                    None if long_side > 0 => (thumbnail(&loaded.image, long_side)?, Vec::new()),
                     None => (display_copy(&loaded.image)?, Vec::new()),
                 };
                 token.check()?;
@@ -140,6 +141,11 @@ impl Engine {
                 let item = self.session.photo(photo)?.clone();
                 let cache_key = display_key(&item.source, crate::pipeline::photo_key(&item.source, &item.origin).1);
                 Some(ImagePlan { cache_key, item, page: None, long_side: 0, priority: JobPriority::Preview })
+            }
+            ImageKey::PhotoThumb(photo) => {
+                let item = self.session.photo(photo)?.clone();
+                let cache_key = format!("{}-thumb", display_key(&item.source, crate::pipeline::photo_key(&item.source, &item.origin).1));
+                Some(ImagePlan { cache_key, item, page: None, long_side: TRAY_THUMB_LONG_SIDE, priority: JobPriority::Render })
             }
             ImageKey::LookPreview(page_id) => {
                 let page = self.session.page(page_id)?.clone();

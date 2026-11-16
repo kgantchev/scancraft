@@ -9,7 +9,7 @@ use std::sync::Arc;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use scancraft_core::command::{Command, Corner};
-use scancraft_core::engine_api::{CropView, EnhanceView, ImageKey, Notice, OutlineView, Screen, TrayItem, ViewState};
+use scancraft_core::engine_api::{CropView, EnhanceView, ImageKey, Notice, OutlineView, PhotoTab, Screen, TrayItem, ViewState};
 use scancraft_core::geom::{Point, Quad, Side};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{CornerOrigin, Detector, FlattenDecision, FlattenMode, FlattenReason, Half, Look, PageId, PhotoId, SideShape};
@@ -56,11 +56,23 @@ fn outline() -> OutlineView {
     }
 }
 
+fn outline_corners() -> scancraft_core::geom::Quad {
+    outline().corners
+}
+
 /// Screen 2's view: one photo of seven, with its page found.
 fn crop_view() -> ViewState {
     ViewState {
         screen: Screen::Crop(PHOTO),
         crop: Some(CropView {
+            photos: (1..=7)
+                .map(|n| PhotoTab {
+                    photo: if n == 2 { PHOTO } else { PhotoId(100 + n) },
+                    page: Some(PageId(200 + n)),
+                    name: format!("IMG_{n}.jpg"),
+                    added: n == 1,
+                })
+                .collect(),
             photo: PHOTO,
             position: (2, 7),
             photo_size: (1200, 900),
@@ -341,11 +353,11 @@ fn bend_handles_are_accessible_adjustable_elements() {
     view.crop.as_mut().expect("the crop view").outlines = vec![outline];
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    for index in 1..=3 {
-        let label = format!("Top side, bend handle {index} of 3");
-        let node = harness.query_by_label(&label).unwrap_or_else(|| panic!("no handle labelled {label:?}"));
-        assert_eq!(node.accesskit_node().role(), egui::Role::Slider, "the handle {label:?} is not adjustable");
-    }
+    // One vertex per bent side, the middle one.
+    let label = "Top side, bend handle 2 of 3";
+    let node = harness.query_by_label(label).unwrap_or_else(|| panic!("no handle labelled {label:?}"));
+    assert_eq!(node.accesskit_node().role(), egui::Role::Slider, "the handle {label:?} is not adjustable");
+    assert!(harness.query_by_label("Top side, bend handle 1 of 3").is_none());
 }
 
 #[test]
@@ -764,19 +776,11 @@ fn tab_then_continues_to_the_bend_handles_and_the_spine() {
     }
     assert_eq!(
         harness.state().0.selection(),
-        Some(Selection::Bend { page: PAGE, side: Side::Top, index: 0 }),
-        "the selection is {:?}",
-        harness.state().0.selection()
-    );
-    harness.key_press(egui::Key::Tab);
-    harness.run();
-    assert_eq!(
-        harness.state().0.selection(),
         Some(Selection::Bend { page: PAGE, side: Side::Top, index: 1 }),
         "the selection is {:?}",
         harness.state().0.selection()
     );
-    for _ in 0..2 {
+    for _ in 0..1 {
         harness.key_press(egui::Key::Tab);
         harness.run();
     }
@@ -1027,25 +1031,35 @@ fn a_corner_drag_sends_crop_set_corner_in_photo_pixels() {
 }
 
 #[test]
-fn an_edge_handle_drag_sends_crop_move_side_with_the_outward_offset() {
+fn a_straight_side_has_no_handle_and_a_single_click_does_nothing() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
-    let handle = bounds_of(&harness, "Top side handle").center();
-    let per_pixel = points_per_photo_pixel(&harness);
-    // The top side's normal points up, away from the page.
-    drag(&mut harness, handle, handle - egui::vec2(0.0, 10.0));
-    let commands = dispatched(&harness);
-    let Some(Command::CropMoveSide { page, side, offset }) = commands.first() else {
-        panic!("the drag sent {commands:?}");
-    };
-    assert_eq!(*page, PAGE);
-    assert_eq!(*side, Side::Top);
-    assert!(offset.abs() > 1.0, "the offset is {offset}");
-    assert!((offset.abs() - 10.0 / per_pixel).abs() < 1.0, "the offset is {offset}, not {}", 10.0 / per_pixel);
+    // Only the four corners are drawn: no side handle, no bend handle.
+    assert!(harness.query_by_label("Top side handle").is_none());
+    assert!(harness.query_all_by_label_contains("bend handle").next().is_none());
+    let target = bounds_of(&harness, "Top side: double-click to bend").center();
+    harness.event(egui::Event::PointerMoved(target));
+    harness.run();
+    // A single click does nothing. (The harness's clock does not make a double-click, so the
+    // command it sends is checked on `bend_through` in the canvas's own tests.)
+    click_at(&mut harness, target);
+    assert!(dispatched(&harness).is_empty(), "a single click sent {:?}", dispatched(&harness));
 }
 
 #[test]
-fn a_bend_handle_drag_sends_crop_bend_side_with_all_three_handles() {
+fn the_strip_lists_every_photo_and_a_click_opens_it() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    for n in 1..=7 {
+        assert!(harness.query_by_label(&format!("Photo {n} of 7: IMG_{n}.jpg")).is_some(), "no tab for photo {n}");
+    }
+    let target = bounds_of(&harness, "Photo 4 of 7: IMG_4.jpg").center();
+    click_at(&mut harness, target);
+    assert_eq!(dispatched(&harness), vec![Command::PageOpenCrop { page: PageId(204) }]);
+}
+
+#[test]
+fn a_bend_vertex_drag_sends_crop_bend_side_on_one_parabola() {
     let mut view = crop_view();
     let mut outline = outline();
     outline.sides[Side::Top.index()] = SideShape::Bent { handles: [Point::new(400.0, 70.0), Point::new(600.0, 60.0), Point::new(800.0, 55.0)] };
@@ -1061,10 +1075,12 @@ fn a_bend_handle_drag_sends_crop_bend_side_with_all_three_handles() {
     };
     assert_eq!(*page, PAGE);
     assert_eq!(*side, Side::Top);
-    // The first and the third handles did not move; the second one did.
-    assert!((handles[0].x - 400.0).abs() < 0.01 && (handles[0].y - 70.0).abs() < 0.01, "the first handle moved: {handles:?}");
-    assert!((handles[2].x - 800.0).abs() < 0.01 && (handles[2].y - 55.0).abs() < 0.01, "the third handle moved: {handles:?}");
-    assert!((handles[1].y - (60.0 - 10.0 / per_pixel)).abs() < 1.0, "the second handle went to {handles:?}");
+    // The vertex went where it was dragged, and the other two stay on the same parabola.
+    assert!((handles[1].y - (60.0 - 10.0 / per_pixel)).abs() < 1.0, "the vertex went to {handles:?}");
+    let corners = outline_corners();
+    let chord_middle_y = (corners.tl().y + corners.tr().y) / 2.0;
+    let d = handles[1].y - chord_middle_y;
+    assert!((handles[0].y - (corners.tl().y * 0.75 + corners.tr().y * 0.25 + 0.75 * d)).abs() < 0.5, "{handles:?}");
 }
 
 #[test]

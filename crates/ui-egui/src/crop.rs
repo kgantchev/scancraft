@@ -4,7 +4,7 @@
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Ui, Vec2};
 
 use scancraft_core::command::{Command, Corner};
-use scancraft_core::engine_api::{CropView, EngineApi, ViewState};
+use scancraft_core::engine_api::{CropView, EngineApi, ImageKey, ViewState};
 use scancraft_core::geom::{Point, Side};
 use scancraft_core::recipe::{Detector, FlattenMode, FlattenReason};
 
@@ -25,6 +25,7 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
         return;
     };
     crop_toolbar(ui, state, view, engine);
+    photo_strip(ui, state, crop, engine);
     let area = ui.available_rect_before_wrap();
     let (rect, _) = ui.allocate_exact_size(area.size(), Sense::hover());
     let display = engine.image(scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo));
@@ -50,6 +51,57 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     keyboard(ui, state, crop, &canvas, engine);
     // The loupe floats above everything, including the tray (§4.3).
     crate::loupe::draw(ui, &canvas, crop, state, engine);
+}
+
+/// The size of a photo's thumbnail in the strip.
+const STRIP_THUMB: Vec2 = Vec2::new(48.0, 64.0);
+
+/// The strip of every photo of the batch, so any one can be opened and corrected, in any order. A
+/// photo whose pages are all in the tray has a tick. It is not shown for a single photo.
+pub fn photo_strip(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &mut dyn EngineApi) {
+    if crop.photos.len() < 2 {
+        return;
+    }
+    ui.add_space(4.0);
+    egui::ScrollArea::horizontal().id_salt("scancraft.photo_strip").auto_shrink([false, true]).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (index, tab) in crop.photos.iter().enumerate() {
+                let (rect, _) = ui.allocate_exact_size(STRIP_THUMB, Sense::hover());
+                let painter = ui.painter_at(rect.expand(3.0));
+                match state.texture(ui, engine, ImageKey::PhotoThumb(tab.photo), egui::TextureOptions::LINEAR) {
+                    Some(texture) => {
+                        painter.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        painter.rect_filled(rect, 2.0, theme::CANVAS_BACKGROUND);
+                    }
+                }
+                if tab.photo == crop.photo {
+                    painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::SCAN_CYAN), egui::StrokeKind::Middle);
+                }
+                if tab.added {
+                    // A tick, drawn: the interface's font has no glyph for one.
+                    let c = rect.right_top() + Vec2::new(-9.0, 9.0);
+                    painter.circle_filled(c, 7.0, theme::HANDLE);
+                    let stroke = egui::Stroke::new(2.0, theme::SCAN_CYAN);
+                    painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 3.0)], stroke);
+                    painter.line_segment([c + Vec2::new(-1.0, 3.0), c + Vec2::new(4.0, -3.5)], stroke);
+                }
+                let id = ui.make_persistent_id(("scancraft.photo_tab", tab.photo));
+                let response = ui.interact(rect, id, Sense::click());
+                let label = format!("Photo {} of {}: {}", index + 1, crop.photos.len(), tab.name);
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, tab.page.is_some(), label.clone()));
+                let response = response.on_hover_text(tab.name.clone());
+                if response.clicked()
+                    && tab.photo != crop.photo
+                    && let Some(page) = tab.page
+                {
+                    canvas::dispatch(state, engine, Command::PageOpenCrop { page });
+                }
+            }
+        });
+    });
+    ui.add_space(4.0);
 }
 
 /// The toolbar above the canvas (§4.3).
@@ -181,7 +233,7 @@ fn split_button(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &mut 
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
 }
 
-/// The items Tab walks through: the four corners, then the bend handles side by side, then the
+/// The items Tab walks through: the four corners, then the one vertex of each bent side, then the
 /// spine's two ends (§4.3).
 pub fn selectable_items(crop: &CropView) -> Vec<Selection> {
     let mut items = Vec::new();
@@ -193,9 +245,7 @@ pub fn selectable_items(crop: &CropView) -> Vec<Selection> {
         if !canvas::side_is_curved(outline, side) {
             continue;
         }
-        for index in 0..canvas::bend_handles(outline, side).len().min(3) {
-            items.push(Selection::Bend { page: outline.page, side, index });
-        }
+        items.push(Selection::Bend { page: outline.page, side, index: canvas::BEND_VERTEX });
     }
     if crop.spine.is_some() {
         items.push(Selection::Spine { photo: crop.photo, end: 0 });
@@ -215,13 +265,10 @@ pub fn move_selection(crop: &CropView, selection: &Selection, dx: f64, dy: f64) 
         }
         Selection::Bend { page, side, index } => {
             let outline = crop.outlines.iter().find(|o| o.page == page)?;
-            let mut handles = canvas::bend_handles(outline, side);
-            if handles.len() < 3 || index >= 3 {
-                return None;
-            }
-            let handle = handles[index];
-            handles[index] = Point::new(handle.x + dx, handle.y + dy);
-            Some(Command::CropBendSide { page, side, handles: [handles[0], handles[1], handles[2]] })
+            let handles = canvas::bend_handles(outline, side);
+            let handle = handles.get(index)?;
+            let moved = canvas::bend_through(outline, side, Point::new(handle.x + dx, handle.y + dy));
+            Some(Command::CropBendSide { page, side, handles: moved })
         }
         Selection::Spine { photo, end } => {
             let spine = crop.spine?;
