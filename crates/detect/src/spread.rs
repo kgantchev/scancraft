@@ -5,7 +5,7 @@
 //! the darkest column of the spread, and no line of text crosses it.
 
 use crate::DetectError;
-use crate::text_lines::{Copy, copy_for, lines_in_copy};
+use crate::text_lines::{AnalysisCopy, copy_for, lines_across};
 use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::{Plane, PlaneF32};
 use scancraft_core::pyramid::LumaPyramid;
@@ -18,8 +18,9 @@ const COPY_LONG_SIDE: u32 = 1000;
 const PROFILE_ROWS: f64 = 0.8;
 /// The share of the width the profile is smoothed by, as σ (step 2).
 const PROFILE_SIGMA: f64 = 0.01;
-/// The middle of the width the gutter is looked for in, as a share on each side (step 3).
-const GUTTER_MIDDLE: f64 = 0.3;
+/// The middle 30 % of the width the gutter is looked for in: this share of the width is left out
+/// on each side (step 3).
+const GUTTER_MARGIN: f64 = 0.35;
 /// How much darker than the paper the gutter must be (step 3).
 const GUTTER_DEPTH: f64 = 0.06;
 /// The share of the text lines that may cross the gutter (step 3).
@@ -37,6 +38,8 @@ const SPREAD_RATIO_MAX: f64 = 1.7;
 const SPINE_CESSION: f64 = 0.005;
 /// The short side of a spread of standard paper, in millimetres, for the copy's density.
 const NOMINAL_SHORT_MM: f64 = 297.0;
+/// Two columns of the smoothed profile this close in level (of 1) are as dark as each other.
+const PLATEAU: f64 = 1e-4;
 
 /// A spine found by steps 1–5.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,22 +72,23 @@ pub fn find_spine(pyramid: &LumaPyramid, outline: &Quad, ratio: f64) -> Result<O
     // Step 2: the column profile.
     let profile = column_profile(&copy.plane)?;
     // Step 3: the gutter, and the text lines that cross it.
-    let Some(gutter) = find_gutter(&profile, &copy)? else {
+    let dpi = f64::from(copy.plane.width().max(copy.plane.height())) / (size.0.max(size.1) / 25.4);
+    let Some(gutter) = find_gutter(&profile, &copy, dpi)? else {
         // Step 5: no gutter. A spread of two pages side by side is cut at the centre.
         if (SPREAD_RATIO_MIN..=SPREAD_RATIO_MAX).contains(&ratio) {
             return Ok(Some(centre_spine(&copy)?));
         }
         return Ok(None);
     };
-    // Step 4: the spine, in the copy's columns.
+    // Step 4: the spine, in the copy's continuous coordinates: x = a + b·y.
     let (a, b) = fit_spine(&copy.plane, &gutter)?;
     let height = f64::from(copy.plane.height());
-    let top = Point::new(a, 0.5);
-    let bottom = Point::new(a + b * height, height - 0.5);
-    let (Some(top_photo), Some(bottom_photo)) = (copy.photo_position(top.x, top.y), copy.photo_position(bottom.x, bottom.y)) else {
+    // The spine runs from the spread's top side to its bottom side, which are the copy's first and
+    // last edge.
+    let (Some(top), Some(bottom)) = (copy.photo_position(a, 0.0), copy.photo_position(a + b * height, height)) else {
         return Ok(None);
     };
-    Ok(Some(Spine { ends: [top_photo, bottom_photo], confidence: gutter.confidence }))
+    Ok(Some(Spine { ends: [top, bottom], confidence: gutter.confidence }))
 }
 
 /// Step 6: cuts the outline and its sides along the spine; left page first.
@@ -113,6 +117,13 @@ pub fn split(outline: &Quad, sides: &[SideShape; 4], spine: &Spine) -> Result<[H
     let right_top = Point::new(top.x + normal.x * cession, top.y + normal.y * cession);
     let right_bottom = Point::new(bottom.x + normal.x * cession, bottom.y + normal.y * cession);
 
+    // The top and bottom sides are cut by the spine. A side the user has bent is a curve through its
+    // two corners and its three handles, and each page needs its own part of it, so it is cut as
+    // the samples it is: the handles lie on the curve.
+    let sides =
+        [cuttable(&sides[0], outline.tl(), outline.tr()), sides[1].clone(), cuttable(&sides[2], outline.bl(), outline.br()), sides[3].clone()];
+    let sides = &sides;
+
     // Each page's spine corners: where its own edge meets the spread's top and bottom sides,
     // along their A25 paths when those are curved.
     let left_tr = side_crossing(&[outline.tl(), outline.tr()], &sides[0], left_top, left_bottom).unwrap_or(left_top);
@@ -137,6 +148,26 @@ pub fn split(outline: &Quad, sides: &[SideShape; 4], spine: &Spine) -> Result<[H
             sides: [half_side(&sides[0], &top, &bottom, false), sides[1].clone(), half_side(&sides[2], &top, &bottom, false), SideShape::Spine],
         },
     ])
+}
+
+/// A side as something the spine can cut: a bent side becomes the samples its corners and handles
+/// give, in drawing order from `from` to `to`. Every other shape is already one.
+fn cuttable(side: &SideShape, from: Point, to: Point) -> SideShape {
+    let SideShape::Bent { handles } = side else { return side.clone() };
+    let path = [from, handles[0], handles[1], handles[2], to];
+    // How far the curve bows from its chord, as a share of the chord.
+    let chord = from.distance(to);
+    let bow = if chord > 0.0 {
+        let (dx, dy) = ((to.x - from.x) / chord, (to.y - from.y) / chord);
+        path.iter().map(|p| ((p.x - from.x) * dy - (p.y - from.y) * dx).abs()).fold(0.0, f64::max) / chord
+    } else {
+        0.0
+    };
+    SideShape::Traced {
+        samples: path.iter().map(|&point| scancraft_core::recipe::SideSample { point, weight: 1.0 }).collect(),
+        bow: bow as f32,
+        curved: true,
+    }
 }
 
 /// The spread's size in millimetres, from its ratio: two pages of standard paper side by side.
@@ -179,8 +210,10 @@ struct Gutter {
     confidence: f32,
 }
 
-/// Step 3: the deepest local minimum in the middle of the width that no text line crosses.
-fn find_gutter(profile: &PlaneF32, copy: &Copy) -> Result<Option<Gutter>, DetectError> {
+/// Step 3: the deepest local minimum in the middle 30 % of the width that no text line crosses.
+///
+/// `dpi` is the copy's density, for A26's ink rule.
+fn find_gutter(profile: &PlaneF32, copy: &AnalysisCopy, dpi: f64) -> Result<Option<Gutter>, DetectError> {
     let w = profile.width() as usize;
     if w < 8 {
         return Ok(None);
@@ -188,54 +221,71 @@ fn find_gutter(profile: &PlaneF32, copy: &Copy) -> Result<Option<Gutter>, Detect
     let values: Vec<f64> = profile.data().iter().map(|&v| f64::from(v)).collect();
     // The paper's level: the mean of the two halves' medians.
     let half = w / 2;
-    let left = median_of(&values[..half]);
-    let right = median_of(&values[half..]);
-    let paper = (left + right) / 2.0;
+    let paper = (median_of(values.get(..half).unwrap_or(&[])) + median_of(values.get(half..).unwrap_or(&[]))) / 2.0;
     if paper <= 1e-6 {
         return Ok(None);
     }
-    // The text lines on this copy, and the ones that cross the gutter.
-    let dpi = copy_density(copy);
-    let lines = lines_in_copy(&copy.plane, dpi)?;
-    let lowest = GUTTER_MIDDLE * w as f64;
+    // The text lines that A26 steps 2 to 5 find on this copy: the ones that run across it.
+    let lines = lines_across(&copy.plane, dpi)?;
+    // A strip of A26's 32 is this wide, in the copy's pixels.
+    let strip = w as f64 / 32.0;
+    let first = (GUTTER_MARGIN * w as f64).ceil() as usize;
+    let last = ((1.0 - GUTTER_MARGIN) * w as f64).floor() as usize;
     let mut best: Option<Gutter> = None;
-    for x in (lowest as usize)..((w as f64 - lowest) as usize).min(w.saturating_sub(1)) {
-        let value = values.get(x).copied().unwrap_or(0.0);
-        let before = values.get(x.wrapping_sub(1)).copied().unwrap_or(value);
-        let after = values.get(x + 1).copied().unwrap_or(value);
+    let mut x = first.max(1);
+    while x <= last.min(w - 2) {
+        let value = values.get(x).copied().unwrap_or(f64::INFINITY);
+        let before = values.get(x - 1).copied().unwrap_or(f64::NEG_INFINITY);
+        // A flat-bottomed dip is one minimum, at its middle: the run of columns as dark as this one.
+        let mut end = x;
+        while end + 1 < w && values.get(end + 1).is_some_and(|v| (v - value).abs() <= PLATEAU) {
+            end += 1;
+        }
+        let after = values.get(end + 1).copied().unwrap_or(f64::NEG_INFINITY);
+        let middle = (x + end) / 2;
+        let next = end + 1;
+        // A local minimum: no higher than what lies either side of it.
         if value > before || value > after {
+            x = next;
             continue;
         }
+        x = next;
+        if middle < first || middle > last {
+            continue;
+        }
+        // At least 6 % darker than the paper.
         let depth = (paper - value) / paper;
         if depth < GUTTER_DEPTH {
             continue;
         }
-        // At most a tenth of the lines may cross the gutter.
-        let crossing = lines.lines.iter().filter(|line| crosses(line, x as f64)).count();
+        // At most a tenth of the text lines cross it.
+        let crossing = lines.lines.iter().filter(|line| crosses(line, middle as f64 + 0.5, strip)).count();
         if !lines.lines.is_empty() && crossing as f64 > GUTTER_CROSSING * lines.lines.len() as f64 {
             continue;
         }
-        let confidence = ((depth - GUTTER_DEPTH) / GUTTER_DEPTH).min(1.0) as f32;
-        let better = best.as_ref().is_none_or(|g| value < g.depth * paper);
-        if better {
-            best = Some(Gutter { column: x as f64, depth, confidence });
+        // The deepest one wins.
+        if best.as_ref().is_none_or(|g| depth > g.depth) {
+            let confidence = ((depth - GUTTER_DEPTH) / GUTTER_DEPTH).min(1.0) as f32;
+            best = Some(Gutter { column: middle as f64 + 0.5, depth, confidence });
         }
     }
     Ok(best)
 }
 
-/// Does the line cross the column?
-fn crosses(line: &[Point], column: f64) -> bool {
-    let Some(first) = line.first() else { return false };
-    let Some(last) = line.last() else { return false };
-    let (low, high) = (first.x.min(last.x), first.x.max(last.x));
-    column >= low && column <= high
-}
+/// How close to the fold, in strips, a line must have ink on each side for it to run through the fold.
+const ADJOINING: f64 = 1.25;
 
-/// The copy's density in pixels per inch, from the spread's nominal size.
-fn copy_density(copy: &Copy) -> f64 {
-    // The spread's long side is a nominal 297 mm; the copy's long side is 1000 px.
-    f64::from(copy.plane.width().max(copy.plane.height())) / (NOMINAL_SHORT_MM * 1.5 / 25.4)
+/// Does the line cross the column? A line crosses it when it has ink on both sides of it, close to
+/// it: a point within [`ADJOINING`] strips to the left and another within as many to the right.
+///
+/// The spine's shadow swamps the strip it lies in, so a heading that runs through the fold has no
+/// point of its own there; its points are either side of the shadow. A26 also lets a line skip two
+/// strips in a row, and the margin between the text of two pages is two or three strips wide, so the
+/// left page's lines and the right page's join into lines that span the fold with no ink beside it.
+/// Those do not cross the fold.
+fn crosses(line: &[Point], column: f64, strip: f64) -> bool {
+    let reach = ADJOINING * strip;
+    line.iter().any(|p| p.x < column && column - p.x <= reach) && line.iter().any(|p| p.x >= column && p.x - column <= reach)
 }
 
 /// Step 4: the spine's line, fitted through the profile's minimum in each band.
@@ -276,17 +326,17 @@ fn fit_spine(plane: &PlaneF32, gutter: &Gutter) -> Result<(f64, f64), DetectErro
                 best = (value, x);
             }
         }
-        points.push((best.1 as f64, (y0 as f64 + y1 as f64) / 2.0));
+        // The column's centre, and the band's centre, in the copy's continuous coordinates.
+        points.push((best.1 as f64 + 0.5, (y0 as f64 + y1 as f64) / 2.0));
     }
     let Some((a, b)) = fit_x_on_y(&points) else {
         return Ok((gutter.column, 0.0));
     };
     // The points more than 1 % of the width from the line are dropped, and the line is fitted again.
     let kept: Vec<(f64, f64)> = points.iter().copied().filter(|(x, y)| (x - (a + b * y)).abs() <= SPINE_FIT * w as f64).collect();
-    match fit_x_on_y(&kept) {
-        Some((a2, b2)) => Ok((a2, b2)),
-        None => Ok((a, b)),
-    }
+    // The spine may lean by up to 8° (step 4). The search window of 3 % of the width either side of
+    // the gutter keeps every fit inside 5°, so no further limit is needed.
+    Ok(fit_x_on_y(&kept).unwrap_or((a, b)))
 }
 
 /// The least-squares fit of x = a + b·y through the points.
@@ -314,16 +364,14 @@ fn fit_x_on_y(points: &[(f64, f64)]) -> Option<(f64, f64)> {
     Some((mx - b * my, b))
 }
 
-/// Step 5: the cut at the centre line.
-fn centre_spine(copy: &Copy) -> Result<Spine, DetectError> {
+/// Step 5: the cut at the centre line, from the copy's top edge to its bottom edge.
+fn centre_spine(copy: &AnalysisCopy) -> Result<Spine, DetectError> {
     let width = f64::from(copy.plane.width());
     let height = f64::from(copy.plane.height());
-    let top = Point::new(width / 2.0, 0.5);
-    let bottom = Point::new(width / 2.0, height - 0.5);
-    let (Some(top_photo), Some(bottom_photo)) = (copy.photo_position(top.x, top.y), copy.photo_position(bottom.x, bottom.y)) else {
+    let (Some(top), Some(bottom)) = (copy.photo_position(width / 2.0, 0.0), copy.photo_position(width / 2.0, height)) else {
         return Err(scancraft_raster::RasterError::BadParameter("the spread's mapping is undefined at its centre").into());
     };
-    Ok(Spine { ends: [top_photo, bottom_photo], confidence: 0.0 })
+    Ok(Spine { ends: [top, bottom], confidence: 0.0 })
 }
 
 /// Where the spine meets a side of the spread: on its chord, or on its traced path.
@@ -342,19 +390,20 @@ fn side_crossing(chord: &[Point; 2], side: &SideShape, top: Point, bottom: Point
     }
 }
 
-/// Where two lines cross.
+/// Where the spine's line crosses a segment of a side, if it does: the spine runs from the top side
+/// to the bottom side, and the page's edge a little to one side of it is a line that reaches the
+/// sides' chords a hair outside the segment between its own ends, so only the side's segment is
+/// bounded.
 fn segment_crossing(segment: &[Point; 2], top: Point, bottom: Point) -> Option<Point> {
     let (a, b) = (segment[0], segment[1]);
-    let (p, q) = (top, bottom);
     let r = (b.x - a.x, b.y - a.y);
-    let s = (q.x - p.x, q.y - p.y);
+    let s = (bottom.x - top.x, bottom.y - top.y);
     let denominator = r.0 * s.1 - r.1 * s.0;
     if denominator.abs() < 1e-12 {
         return None;
     }
-    let t = ((p.x - a.x) * s.1 - (p.y - a.y) * s.0) / denominator;
-    let u = ((p.x - a.x) * r.1 - (p.y - a.y) * r.0) / denominator;
-    if !(0.0..=1.0).contains(&t) || !(0.0..=1.0).contains(&u) {
+    let t = ((top.x - a.x) * s.1 - (top.y - a.y) * s.0) / denominator;
+    if !(0.0..=1.0).contains(&t) {
         return None;
     }
     Some(Point::new(a.x + t * r.0, a.y + t * r.1))
