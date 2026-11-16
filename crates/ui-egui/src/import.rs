@@ -30,7 +30,7 @@ pub fn import_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine:
     }
     let area = ui.available_rect_before_wrap();
     let drop_zone = drop_zone_rect(area);
-    draw_drop_zone(ui, state, drop_zone, engine);
+    draw_drop_zone(ui, state, drop_zone);
     ui.allocate_space(Vec2::new(0.0, 12.0));
     browse_button(ui, state, drop_zone);
 }
@@ -42,13 +42,14 @@ pub fn drop_zone_rect(area: Rect) -> Rect {
 }
 
 /// Draws the dashed rounded rectangle, its label and the formats underneath.
-fn draw_drop_zone(ui: &mut Ui, state: &mut UiState, rect: Rect, engine: &mut dyn EngineApi) {
+fn draw_drop_zone(ui: &mut Ui, state: &mut UiState, rect: Rect) {
     let hovering = ui.input(|i| !i.raw.hovered_files.is_empty());
-    let colour = if hovering { theme::SCAN_CYAN } else { ui.visuals().weak_text_color() };
+    let accent = theme::accent(ui.visuals().dark_mode);
+    let colour = if hovering { accent } else { ui.visuals().weak_text_color() };
     let path = rounded_rect_path(rect, CORNER_RADIUS);
     let painter = ui.painter_at(rect);
     if hovering {
-        painter.rect_filled(rect, CORNER_RADIUS, theme::CYAN_TINT);
+        painter.rect_filled(rect, CORNER_RADIUS, accent.gamma_multiply(0.1));
     }
     for shape in Shape::dashed_line(&path, Stroke::new(DASH_WIDTH, colour), DASH_LENGTH, GAP_LENGTH) {
         painter.add(shape);
@@ -59,21 +60,15 @@ fn draw_drop_zone(ui: &mut Ui, state: &mut UiState, rect: Rect, engine: &mut dyn
     let body = FontId::proportional(14.0);
     let title_rect = painter.text(rect.center() - Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, label.clone(), title, ui.visuals().text_color());
     painter.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, formats.clone(), body, ui.visuals().weak_text_color());
-    // The zone is where the files land: it is part of the interface a screen reader reads.
+    // The zone is where the files land, and a click on it opens the Open panel, the same as the
+    // button under it: it is part of the interface a screen reader reads.
     let id = ui.make_persistent_id("scancraft.drop-zone");
-    let response = ui.interact(rect, id, Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, format!("{label}. {formats}")));
-    let _ = title_rect;
-    handle_drop(ui, state, engine);
-}
-
-/// A drop starts the import (§4.2).
-fn handle_drop(ui: &Ui, state: &mut UiState, engine: &mut dyn EngineApi) {
-    let dropped: Vec<String> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().into_owned()).collect());
-    if dropped.is_empty() {
-        return;
+    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{label}. {formats}")));
+    if response.clicked() {
+        state.actions.push(crate::state::UiAction::ImportFiles);
     }
-    dispatch(state, engine, Command::ImportAdd { paths: dropped });
+    let _ = title_rect;
 }
 
 /// The Browse Files… button: the app shell opens the Open panel (§4.2).
@@ -142,5 +137,5 @@ pub fn rounded_rect_path(rect: Rect, radius: f32) -> Vec<Pos2> {
 
 /// The colour of the drop zone's border.
 pub fn drop_zone_colour(ui: &Ui, hovering: bool) -> Color32 {
-    if hovering { theme::SCAN_CYAN } else { ui.visuals().weak_text_color() }
+    if hovering { theme::accent(ui.visuals().dark_mode) } else { ui.visuals().weak_text_color() }
 }

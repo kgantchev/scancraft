@@ -11,7 +11,7 @@ use egui::{Color32, Context, CornerRadius, Stroke, Ui, Vec2};
 pub const COPPER: Color32 = Color32::from_rgb(0xA8, 0x41, 0x28);
 /// Light Copper `#D87840`: the hover and pressed states.
 pub const LIGHT_COPPER: Color32 = Color32::from_rgb(0xD8, 0x78, 0x40);
-/// Scan Cyan `#02FDFE`: the page outline, the handles and the focus ring.
+/// Scan Cyan `#02FDFE`: the page outline and the handles, on the dark canvas.
 pub const SCAN_CYAN: Color32 = Color32::from_rgb(0x02, 0xFD, 0xFE);
 /// The canvas background `#1C1C1E`, the same in both appearances.
 pub const CANVAS_BACKGROUND: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1E);
@@ -28,8 +28,9 @@ pub const HANDLE: Color32 = Color32::WHITE;
 
 /// The width of the page outline's line (§4.3).
 pub const OUTLINE_WIDTH: f32 = 2.0;
-/// The width of the halo under it (§4.3).
-pub const HALO_WIDTH: f32 = 1.0;
+/// The width of the halo under it, wider than the line so the dark edge shows on both sides of it
+/// (§4.3).
+pub const HALO_WIDTH: f32 = 4.0;
 /// The radius of a corner node's white circle (§4.3).
 pub const CORNER_RADIUS: f32 = 8.0;
 /// The width of a corner node's cyan ring (§4.3).
@@ -43,25 +44,56 @@ pub const EDGE_HANDLE: Vec2 = Vec2::new(6.0, 22.0);
 /// The radius of the spine's end handles (§4.3).
 pub const SPINE_RADIUS: f32 = 10.0;
 
-/// Pushes ScanCraft's palette into the context's style: Copper buttons, Light Copper while they
-/// are hovered or pressed, and a Scan Cyan focus ring.
+/// The neutral fill of a control at rest, under the pointer and pressed. Controls are neutral in
+/// both appearances, so the one copper button of a view is the one that moves on.
+fn neutral_fills(dark: bool) -> (Color32, Color32, Color32) {
+    if dark {
+        (Color32::from_rgb(0x3A, 0x3A, 0x3D), Color32::from_rgb(0x48, 0x48, 0x4C), Color32::from_rgb(0x55, 0x55, 0x5A))
+    } else {
+        (Color32::from_rgb(0xE2, 0xE2, 0xE5), Color32::from_rgb(0xD2, 0xD2, 0xD7), Color32::from_rgb(0xC2, 0xC2, 0xC8))
+    }
+}
+
+/// The colour that marks a selection or the keyboard focus on the window's own background: Copper
+/// on the light one, where Scan Cyan can hardly be seen, and Light Copper on the dark one. Scan
+/// Cyan stays on the dark canvas.
+pub fn accent(dark: bool) -> Color32 {
+    if dark { LIGHT_COPPER } else { COPPER }
+}
+
+/// Pushes ScanCraft's palette into the context's style: neutral controls, a copper selection and a
+/// copper focus ring.
 ///
-/// The palette sets every widget state's fill, and the non-interactive state is also the window's
-/// own background, so that one is put back the way egui had it.
+/// Every control rests in a neutral grey, so an unticked checkbox or an unselected radio button
+/// does not look selected, and copper is left to the one primary button of a view
+/// ([`nav_button`]). The palette sets every widget state's fill, and the non-interactive state is
+/// also the window's own background, so that one is put back the way egui had it, and so is every
+/// state's text colour.
 pub fn apply(ctx: &Context) {
-    let dark = ctx.theme() == egui::Theme::Dark;
-    let panel = if dark { Color32::from_rgb(0x25, 0x25, 0x27) } else { Color32::from_rgb(0xF2, 0xF2, 0xF2) };
-    let palette = WidgetPalette { noninteractive: panel, inactive: COPPER, hovered: LIGHT_COPPER, active: LIGHT_COPPER, open: COPPER };
     let theme = ctx.theme();
+    let dark = theme == egui::Theme::Dark;
+    let panel = if dark { Color32::from_rgb(0x25, 0x25, 0x27) } else { Color32::from_rgb(0xF2, 0xF2, 0xF2) };
+    let (rest, hover, pressed) = neutral_fills(dark);
+    let palette = WidgetPalette { noninteractive: panel, inactive: rest, hovered: hover, active: pressed, open: rest };
+    let defaults = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let accent = accent(dark);
     ctx.style_mut_of(theme, |style| {
         let window = style.visuals.widgets.noninteractive;
         palette.apply_to(&mut style.visuals.widgets, CornerRadius::same(6), Stroke::new(1.0, Color32::WHITE));
         style.visuals.widgets.noninteractive = window;
-        style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, SCAN_CYAN);
-        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, LIGHT_COPPER);
-        style.visuals.selection.stroke = Stroke::new(2.0, SCAN_CYAN);
-        style.visuals.selection.bg_fill = SCAN_CYAN.gamma_multiply(0.25);
-        style.visuals.hyperlink_color = SCAN_CYAN;
+        let widgets = &mut style.visuals.widgets;
+        widgets.inactive.fg_stroke = defaults.widgets.inactive.fg_stroke;
+        widgets.hovered.fg_stroke = defaults.widgets.hovered.fg_stroke;
+        widgets.active.fg_stroke = defaults.widgets.active.fg_stroke;
+        widgets.open.fg_stroke = defaults.widgets.open.fg_stroke;
+        widgets.inactive.bg_stroke = Stroke::NONE;
+        // The pressed and the focused state: the ring the keyboard's focus shows.
+        widgets.active.bg_stroke = Stroke::new(2.0, accent);
+        widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.6));
+        // A selection is a tint of copper with copper ink: legible on both backgrounds.
+        style.visuals.selection.stroke = Stroke::new(1.5, accent);
+        style.visuals.selection.bg_fill = accent.gamma_multiply(if dark { 0.3 } else { 0.18 });
+        style.visuals.hyperlink_color = accent;
     });
 }
 
@@ -121,7 +153,7 @@ pub fn arrow_button(ui: &mut Ui, label: &str, pointing: Arrow) -> egui::Response
 
 /// The fill of a tool button: neutral, so the copper buttons stay the ones that move on.
 pub fn tool_fill(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode { Color32::from_rgb(0x3A, 0x3A, 0x3D) } else { Color32::from_rgb(0xD9, 0xD9, 0xDC) }
+    neutral_fills(ui.visuals().dark_mode).0
 }
 
 /// A button that changes the picture or the page: neutral and full width, never copper.
@@ -131,6 +163,37 @@ pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     let button =
         egui::Button::new(egui::RichText::new(label).color(ink)).fill(fill).stroke(Stroke::NONE).min_size(Vec2::new(ui.available_width(), 28.0));
     ui.add_enabled(enabled, button)
+}
+
+/// A small drawn icon at the head of a toast: a red disc with an exclamation mark for an error, a
+/// neutral disc with a tick for anything else. The two differ in shape as well as in colour.
+pub fn toast_icon(ui: &mut Ui, error: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let c = rect.center();
+    if error {
+        painter.circle_filled(c, 8.0, INVALID);
+        painter.line_segment([c + Vec2::new(0.0, -4.0), c + Vec2::new(0.0, 1.0)], Stroke::new(2.0, Color32::WHITE));
+        painter.circle_filled(c + Vec2::new(0.0, 4.0), 1.2, Color32::WHITE);
+    } else {
+        painter.circle_filled(c, 8.0, accent(ui.visuals().dark_mode));
+        let stroke = Stroke::new(2.0, Color32::WHITE);
+        painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 3.0)], stroke);
+        painter.line_segment([c + Vec2::new(-1.0, 3.0), c + Vec2::new(4.0, -3.5)], stroke);
+    }
+}
+
+/// A small close button, a drawn cross with `label` as its accessible name.
+pub fn close_button(ui: &mut Ui, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::click());
+    let colour = if response.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, colour);
+    let painter = ui.painter_at(rect);
+    painter.line_segment([c + Vec2::new(-4.0, -4.0), c + Vec2::new(4.0, 4.0)], stroke);
+    painter.line_segment([c + Vec2::new(-4.0, 4.0), c + Vec2::new(4.0, -4.0)], stroke);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The colour of text on the window's own background, in either appearance.

@@ -498,24 +498,61 @@ fn browse_files_asks_the_shell_for_the_open_panel() {
     assert_eq!(harness.state_mut().0.take_actions(), vec![UiAction::ImportFiles]);
 }
 
+/// A file dropped on the window.
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+}
+
 #[test]
 fn dropped_files_send_import_add_in_order() {
-    #[derive(Debug)]
-    struct Dropped(std::path::PathBuf);
-    impl egui::DroppedFile for Dropped {
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-        fn bytes(&self) -> Result<Vec<u8>, String> {
-            Ok(Vec::new())
-        }
-    }
     let mut harness = harness(import_view(), egui::Theme::Light);
     harness.run();
     harness.input_mut().dropped_files.push(Arc::new(Dropped("/tmp/IMG_9.jpg".into())));
     harness.input_mut().dropped_files.push(Arc::new(Dropped("/tmp/IMG_10.jpg".into())));
     harness.run();
     assert_eq!(dispatched(&harness), vec![Command::ImportAdd { paths: vec!["/tmp/IMG_9.jpg".to_owned(), "/tmp/IMG_10.jpg".to_owned()] }]);
+}
+
+#[test]
+fn files_can_be_dropped_on_any_screen() {
+    // Dropping used to work only on the Import screen: anywhere else, the files were ignored.
+    for (name, view) in [("crop", crop_view()), ("enhance", enhance_view())] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        harness.input_mut().dropped_files.push(Arc::new(Dropped("/tmp/IMG_9.jpg".into())));
+        harness.run();
+        assert_eq!(dispatched(&harness), vec![Command::ImportAdd { paths: vec!["/tmp/IMG_9.jpg".to_owned()] }], "a drop on the {name} screen");
+    }
+}
+
+#[test]
+fn files_held_over_any_screen_show_what_a_drop_would_do() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    assert!(!shown_text(&harness).contains("Drop to add pages"));
+    harness.input_mut().hovered_files.push(egui::HoveredFile::default());
+    // Files held over the window keep it repainting, so it is stepped, not run until it settles.
+    harness.step();
+    // The overlay is painted, not a widget: it is in the frame's shapes.
+    let painted = format!("{:?}", harness.output().shapes);
+    assert!(painted.contains("Drop to add pages"), "nothing said what a drop would do");
+}
+
+#[test]
+fn clicking_the_drop_zone_opens_the_open_panel() {
+    let mut harness = harness(import_view(), egui::Theme::Light);
+    harness.run();
+    // The middle of the zone, away from the Browse Files… button under it.
+    click_at(&mut harness, egui::pos2(600.0, 300.0));
+    assert!(harness.state_mut().0.take_actions().contains(&UiAction::ImportFiles), "a click on the drop zone did nothing");
 }
 
 #[test]
@@ -693,40 +730,47 @@ fn a_spline_through_five_points_is_centripetal() {
 }
 
 #[test]
-fn the_loupe_centre_is_110_points_above_the_pointer() {
-    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-    let centre = scancraft_ui_egui::loupe::loupe_centre(egui::Pos2::new(600.0, 500.0), window);
-    assert!((centre.y - 390.0).abs() < 0.01, "the loupe's centre is at {}", centre.y);
-    assert!((centre.x - 600.0).abs() < 0.01);
+fn a_photo_pixel_is_scale_times_k_points_wide() {
+    // A 12-megapixel photo (4032 px wide) shown from its 3072 px display copy in a 1200 pt wide
+    // canvas. The canvas reported scale / k, which for any photo wider than 3072 px made the
+    // loupe's view wider than the canvas's own.
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let canvas = scancraft_ui_egui::canvas::Canvas::new(area, &picture(3072, 2304), (4032, 3024));
+    let expected = f64::from(canvas.rect.width()) / 4032.0;
+    assert!((canvas.points_per_photo_px() - expected).abs() < 1e-6, "{} points to a photo pixel, not {expected}", canvas.points_per_photo_px());
+    // The same number from the conversions that draw the canvas.
+    let one = canvas.photo_to_canvas(Point::new(1.0, 0.0)).x - canvas.photo_to_canvas(Point::new(0.0, 0.0)).x;
+    assert!((f64::from(one) - canvas.points_per_photo_px()).abs() < 1e-5);
 }
 
 #[test]
-fn the_loupe_centre_flips_below_the_pointer_near_the_window_top() {
-    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-    let centre = scancraft_ui_egui::loupe::loupe_centre(egui::Pos2::new(600.0, 100.0), window);
-    assert!((centre.y - 210.0).abs() < 0.01, "the loupe's centre is at {}", centre.y);
+fn zooming_keeps_the_point_under_the_pointer_still() {
+    use scancraft_ui_egui::state::CanvasView;
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let display = picture(600, 450);
+    let before = scancraft_ui_egui::canvas::Canvas::new(area, &display, (1200, 900));
+    let pointer = egui::pos2(500.0, 300.0);
+    let photo = before.canvas_to_photo(pointer);
+    let view = CanvasView::default().zoomed(3.0, pointer, area);
+    let after = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), view);
+    assert!((after.view.zoom - 3.0).abs() < 1e-6);
+    let still = after.photo_to_canvas(photo);
+    assert!((still.x - pointer.x).abs() < 0.01 && (still.y - pointer.y).abs() < 0.01, "the photo point moved to {still:?}");
+    // And the photo is three times the size.
+    assert!((after.points_per_photo_px() / before.points_per_photo_px() - 3.0).abs() < 1e-6);
 }
 
 #[test]
-fn the_loupe_stays_inside_the_window() {
-    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-    for pointer in [egui::Pos2::new(0.0, 0.0), egui::Pos2::new(1200.0, 800.0), egui::Pos2::new(5.0, 795.0)] {
-        let centre = scancraft_ui_egui::loupe::loupe_centre(pointer, window);
-        assert!(centre.x - 70.0 >= window.min.x - 0.01 && centre.x + 70.0 <= window.max.x + 0.01, "the loupe is outside: {centre:?}");
-        assert!(centre.y - 70.0 >= window.min.y - 0.01 && centre.y + 70.0 <= window.max.y + 0.01, "the loupe is outside: {centre:?}");
-    }
-}
-
-#[test]
-fn the_loupe_asks_for_a_crop_of_the_right_size() {
-    // The loupe shows the photo at three times the canvas zoom.
-    let points_per_photo_px = 2.0;
-    let in_loupe = points_per_photo_px / 3.0;
-    let side = scancraft_ui_egui::loupe::crop_side(in_loupe);
-    let across = 140.0 / in_loupe;
-    assert!((side - 1.5 * across).abs() < 1e-9, "the crop's side is {side}");
-    // The crop is at most 1024 photo pixels.
-    assert_eq!(scancraft_ui_egui::loupe::crop_side(0.0001), 1024.0);
+fn the_pan_cannot_take_the_photo_off_the_canvas() {
+    use scancraft_ui_egui::state::CanvasView;
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let display = picture(600, 450);
+    let far = CanvasView { zoom: 2.0, pan: egui::vec2(50_000.0, -50_000.0) };
+    let canvas = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), far);
+    assert!(canvas.workspace.intersects(area.shrink(31.0)), "the photo {:?} left the canvas {area:?}", canvas.workspace);
+    // Not zoomed in, there is nothing to pan: the photo stays where the fit puts it.
+    let whole = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), CanvasView { zoom: 1.0, pan: egui::vec2(300.0, 300.0) });
+    assert_eq!(whole.rect, scancraft_ui_egui::canvas::Canvas::new(area, &display, (1200, 900)).rect);
 }
 
 // -------------------------------------------------------------- the keyboard
@@ -1031,19 +1075,45 @@ fn a_corner_drag_sends_crop_set_corner_in_photo_pixels() {
 }
 
 #[test]
-fn a_straight_side_has_no_handle_and_a_single_click_does_nothing() {
+fn a_straight_side_has_a_pill_and_a_single_click_does_nothing() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
-    // Only the four corners are drawn: no side handle, no bend handle.
-    assert!(harness.query_by_label("Top side handle").is_none());
-    assert!(harness.query_all_by_label_contains("bend handle").next().is_none());
-    let target = bounds_of(&harness, "Top side: double-click to bend").center();
+    // Every straight side has its pill; no side is bent, so no bend handle is drawn.
+    for side in ["Top", "Right", "Bottom", "Left"] {
+        let label = format!("{side} side handle: drag to move, double-click to bend");
+        assert!(harness.query_by_label(&label).is_some(), "no pill on the {side} side");
+    }
+    assert!(harness.query_all_by_label_contains("bend handle 2 of 3").next().is_none());
+    let target = bounds_of(&harness, "Top side handle: drag to move, double-click to bend").center();
     harness.event(egui::Event::PointerMoved(target));
     harness.run();
     // A single click does nothing. (The harness's clock does not make a double-click, so the
     // command it sends is checked on `bend_through` in the canvas's own tests.)
     click_at(&mut harness, target);
     assert!(dispatched(&harness).is_empty(), "a single click sent {:?}", dispatched(&harness));
+}
+
+#[test]
+fn dragging_a_sides_pill_sends_crop_move_side_along_its_outward_normal() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let per_pixel = points_per_photo_pixel(&harness);
+    let pill = bounds_of(&harness, "Top side handle: drag to move, double-click to bend").center();
+    // Drag the top side 12 points up the screen: away from the page, by 12 points of photo.
+    drag(&mut harness, pill, pill - egui::vec2(0.0, 12.0));
+    let commands = dispatched(&harness);
+    assert!(!commands.is_empty(), "the drag sent nothing");
+    let mut total = 0.0;
+    for command in &commands {
+        let Command::CropMoveSide { page, side, offset } = command else {
+            panic!("the drag sent {command:?}");
+        };
+        assert_eq!(*page, PAGE);
+        assert_eq!(*side, Side::Top);
+        total += offset;
+    }
+    // The top side's outward normal points up the screen, so the offsets add up to the drag.
+    assert!((total - 12.0 / per_pixel).abs() < 1.0, "the side moved {total} photo pixels, not {}", 12.0 / per_pixel);
 }
 
 #[test]
@@ -1112,6 +1182,85 @@ fn the_loupe_appears_after_a_keyboard_nudge() {
     let since = harness.state().0.loupe_since().expect("the loupe has no start");
     // The loupe shows for a second (§4.3).
     assert!((until - since - 1.0).abs() < 1e-9, "the loupe shows for {} seconds", until - since);
+}
+
+/// A press on a corner's handle, off its centre by `by` points, with the button still down.
+fn press_corner(harness: &mut Harness<TestState>, by: egui::Vec2) -> egui::Pos2 {
+    let corner = bounds_of(harness, "Top-left corner, 120, 80").center();
+    let at = corner + by;
+    harness.hover_at(at);
+    harness.drag_at(at);
+    harness.run();
+    at
+}
+
+#[test]
+fn a_still_press_on_a_corner_shows_the_loupe_and_release_hides_it() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    assert!(!harness.state().0.loupe_held(), "the loupe showed before anything was pressed");
+    let at = press_corner(&mut harness, egui::Vec2::ZERO);
+    // The pointer has not moved: a still press is enough.
+    assert!(harness.state().0.loupe_held(), "a still press did not show the loupe");
+    let focus = harness.state().0.loupe_focus().expect("the loupe has no focus");
+    assert!((focus.x - 120.0).abs() < 1.0 && (focus.y - 80.0).abs() < 1.0, "the loupe looks at {focus:?}, not at the corner");
+    assert!(harness.state_mut().1.loupe_requests().iter().all(|(photo, _, _)| *photo == PHOTO));
+    harness.drop_at(at);
+    harness.run();
+    assert!(!harness.state().0.loupe_held(), "the loupe stayed after the button was released");
+    // It does not linger either: a nudge is the only thing that holds it past the release.
+    assert!(harness.state().0.loupe_until().is_none());
+}
+
+#[test]
+fn the_loupe_asks_the_engine_for_a_crop_sized_to_the_lens() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    press_corner(&mut harness, egui::Vec2::ZERO);
+    let per_pixel = points_per_photo_pixel(&harness);
+    let requests = harness.state().1.loupe_requests().to_vec();
+    let (photo, centre, side) = requests.last().copied().expect("the loupe asked the engine for nothing");
+    assert_eq!(photo, PHOTO);
+    // The crop is centred on the corner, and holds what a 180 pt lens shows at three times the canvas zoom.
+    assert!((centre.x - 120.0).abs() < 1.0 && (centre.y - 80.0).abs() < 1.0, "the crop is centred on {centre:?}");
+    let across = 180.0 / (per_pixel * 3.0);
+    assert!((side - scancraft_ui_egui::loupe::CROP_MARGIN * across).abs() < 1.0, "the crop is {side} photo pixels, for a lens that shows {across}");
+}
+
+#[test]
+fn a_grab_off_the_handles_centre_does_not_move_the_corner() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let per_pixel = points_per_photo_pixel(&harness);
+    // Press 15 points to the right of the handle's centre: inside the 44 pt grab area, outside the
+    // 16 pt handle. Then move the pointer 3 points.
+    let at = press_corner(&mut harness, egui::vec2(15.0, 0.0));
+    harness.hover_at(at + egui::vec2(3.0, 0.0));
+    harness.run();
+    harness.hover_at(at + egui::vec2(8.0, 0.0));
+    harness.run();
+    let commands = dispatched(&harness);
+    let Some(Command::CropSetCorner { x, y, .. }) = commands.last() else {
+        panic!("the drag sent {commands:?}");
+    };
+    // The corner follows the pointer's movement (8 points), not the pointer's position (23 points from the corner).
+    assert!((x - (120.0 + 8.0 / per_pixel)).abs() < 1.0, "the corner went to {x}, a jump of {} photo pixels", x - 120.0);
+    assert!((y - 80.0).abs() < 1.0, "the corner's height changed to {y}");
+}
+
+#[test]
+fn the_loupe_is_centred_on_the_corner_not_on_the_pointer() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let per_pixel = points_per_photo_pixel(&harness);
+    let at = press_corner(&mut harness, egui::vec2(12.0, 6.0));
+    harness.hover_at(at + egui::vec2(20.0, 0.0));
+    harness.run();
+    // The pointer is 12 points right of the handle and has moved 20 more: the handle is 20 points
+    // from where it started, and that is where the loupe looks.
+    let focus = harness.state().0.loupe_focus().expect("the loupe has no focus");
+    assert!((focus.x - (120.0 + 20.0 / per_pixel)).abs() < 1.0, "the loupe looks at x = {}, not the corner's {}", focus.x, 120.0 + 20.0 / per_pixel);
+    assert!((focus.y - 80.0).abs() < 1.0, "the loupe looks at y = {}", focus.y);
 }
 
 #[test]

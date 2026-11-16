@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use egui::{Pos2, TextureHandle};
+use egui::TextureHandle;
 use scancraft_core::command::Corner;
-use scancraft_core::engine_api::{EngineApi, ImageKey, Notice};
+use scancraft_core::engine_api::{EngineApi, ImageKey};
 use scancraft_core::geom::{Point, Side};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{ExportOptions, PageId, PageOrder, Paper, PhotoId};
@@ -110,6 +110,37 @@ pub struct LoupeTexture {
     pub handle: TextureHandle,
 }
 
+/// What the magnifier is showing and for how long (§4.3).
+///
+/// It shows while a handle is pressed and goes the moment the button is released. A keyboard
+/// nudge has no button to release, so it shows the loupe for a second instead.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoupeState {
+    /// The photo position it magnifies: the handle's, in full-resolution photo pixels.
+    pub focus: Option<Point>,
+    /// A handle is pressed this frame.
+    pub held: bool,
+    /// After a keyboard nudge the loupe shows until this time, in seconds since the app started.
+    pub until: Option<f64>,
+    /// When the last nudge showed it, in the same clock.
+    pub since: Option<f64>,
+}
+
+/// The photo's view on the canvas: how far it is zoomed in, and where the pan has put it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasView {
+    /// 1 is the whole photo in the canvas; larger shows less of it, larger.
+    pub zoom: f32,
+    /// How far the photo's centre has moved from the canvas's centre, in points.
+    pub pan: egui::Vec2,
+}
+
+impl Default for CanvasView {
+    fn default() -> CanvasView {
+        CanvasView { zoom: 1.0, pan: egui::Vec2::ZERO }
+    }
+}
+
 /// The edge handle being dragged: where the side was when the drag began, and how far the
 /// pointer has come along the side's outward normal since the last frame.
 #[derive(Debug, Clone, Copy)]
@@ -152,12 +183,16 @@ pub struct UiState {
     pub text: Text,
     /// The keyboard's selection on Screen 2.
     pub selection: Option<Selection>,
-    /// The loupe is shown until this time, in seconds since the app started.
-    pub loupe_until: Option<f64>,
-    /// When the loupe was last shown, in the same clock.
-    pub loupe_since: Option<f64>,
-    /// Where the loupe is centred, in window points.
-    pub loupe_centre: Option<Pos2>,
+    /// The magnifier: where it looks, and whether a handle holds it open.
+    pub loupe: LoupeState,
+    /// The handle the pointer is pressing now, so it can be drawn as a ring.
+    pub pressed_handle: Option<egui::Id>,
+    /// How far off a handle's centre the press began, so a grab does not move the handle.
+    pub grab: egui::Vec2,
+    /// The photo's zoom and pan on the canvas, and the photo they belong to.
+    pub canvas_view: CanvasView,
+    /// The photo `canvas_view` is for: opening another photo starts again at the whole photo.
+    pub canvas_view_of: Option<PhotoId>,
     /// The filter strip's selection: 0 is Original, 3 is Color Document.
     pub filter_index: usize,
     /// The page tray is hidden (⌥⌘T).
@@ -178,8 +213,8 @@ pub struct UiState {
     pub export_options: ExportOptions,
     /// The Settings window's values (§4.6).
     pub settings: Settings,
-    /// The messages the interface itself shows (§4.8).
-    pub notices: Vec<Notice>,
+    /// The messages floating over the window (§4.8).
+    pub notices: Vec<Toast>,
     /// The texts of the engine's notices the last frame showed, so a notice is taken into
     /// [`UiState::notices`] once, however many frames the engine keeps it.
     pub engine_notices_seen: Vec<String>,
@@ -206,8 +241,47 @@ pub struct UiState {
     pub work_seen: (usize, usize),
 }
 
-/// How many messages the strip keeps; the oldest goes when there are more.
+/// How many messages are kept at once; the oldest goes when there are more.
 pub const MAX_NOTICES: usize = 8;
+/// How long a message that is not an error stays on the screen, in seconds.
+pub const TOAST_SECONDS: f64 = 5.0;
+/// How long the end of that time is spent fading, in seconds.
+pub const TOAST_FADE: f64 = 0.6;
+
+/// A message that floats over the window: a short event, which fades after [`TOAST_SECONDS`], or
+/// an error, which stays until it is closed (§4.8). It takes no room in the layout, so the screen
+/// under it does not move when it comes or goes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Toast {
+    /// What it says.
+    pub text: String,
+    /// An error: it stays until the user closes it.
+    pub error: bool,
+    /// It offers an Undo beside the text, which runs the general undo: the last thing done is the
+    /// thing the message is about.
+    pub undo: bool,
+    /// When it first showed, in seconds on the app's clock. It is set on the first frame that
+    /// draws it, because the code that makes a message has no clock.
+    pub shown_at: Option<f64>,
+}
+
+impl Toast {
+    /// Whether it has been up long enough to go: errors never do.
+    pub fn expired(&self, now: f64) -> bool {
+        !self.error && self.shown_at.is_some_and(|at| now - at >= TOAST_SECONDS)
+    }
+
+    /// How opaque it is at `now`: 1 until the last moments, then fading to 0.
+    pub fn opacity(&self, now: f64) -> f32 {
+        if self.error {
+            return 1.0;
+        }
+        match self.shown_at {
+            Some(at) => (((TOAST_SECONDS - (now - at)) / TOAST_FADE).clamp(0.0, 1.0)) as f32,
+            None => 1.0,
+        }
+    }
+}
 
 impl UiState {
     /// The state of a fresh session.
@@ -215,9 +289,11 @@ impl UiState {
         UiState {
             text: Text::new(),
             selection: None,
-            loupe_until: None,
-            loupe_since: None,
-            loupe_centre: None,
+            loupe: LoupeState::default(),
+            pressed_handle: None,
+            grab: egui::Vec2::ZERO,
+            canvas_view: CanvasView::default(),
+            canvas_view_of: None,
             filter_index: 3,
             tray_hidden: false,
             export_popover: false,
@@ -255,7 +331,8 @@ impl UiState {
         {
             return Some(cached.handle.clone());
         }
-        let handle = ui.ctx().load_texture("scancraft-loupe", color_image(&crop.image), egui::TextureOptions::NEAREST);
+        // Smoothed: nearest-neighbour sampling shimmers as the lens moves over text.
+        let handle = ui.ctx().load_texture("scancraft-loupe", color_image(&crop.image), egui::TextureOptions::LINEAR);
         self.loupe_texture = Some(LoupeTexture { origin: crop.origin, scale: crop.scale, image: crop.image.clone(), handle: handle.clone() });
         Some(handle)
     }
@@ -304,28 +381,42 @@ impl UiState {
         self.actions.push(UiAction::ExportPdf { options });
     }
 
-    /// Shows the loupe for a second, centred at `centre` (§4.3).
-    pub fn show_loupe(&mut self, now: f64, centre: Pos2) {
-        self.loupe_until = Some(now + 1.0);
-        self.loupe_since = Some(now);
-        self.loupe_centre = Some(centre);
+    /// Shows the loupe for a second on `focus`, a photo position: what a keyboard nudge does,
+    /// which has no button to release (§4.3).
+    pub fn show_loupe(&mut self, now: f64, focus: Point) {
+        self.loupe.until = Some(now + 1.0);
+        self.loupe.since = Some(now);
+        self.loupe.focus = Some(focus);
+    }
+
+    /// Keeps the loupe open on `focus`, a photo position, while a handle is pressed (§4.3).
+    pub fn hold_loupe(&mut self, focus: Point) {
+        self.loupe.held = true;
+        self.loupe.focus = Some(focus);
     }
 
     /// Whether the loupe is showing now.
     pub fn loupe_visible(&self, now: f64) -> bool {
-        self.loupe_until.is_some_and(|until| now < until)
+        self.loupe.held || self.loupe.until.is_some_and(|until| now < until)
     }
 
-    /// Adds a message for the user (§4.8).
+    /// Adds a message for the user (§4.8). Saying the same thing again shows it again.
     pub fn notice(&mut self, text: impl Into<String>, error: bool) {
-        let text = text.into();
-        if self.notices.iter().any(|n| n.text == text) {
-            return;
-        }
+        self.push_toast(Toast { text: text.into(), error, undo: false, shown_at: None });
+    }
+
+    /// Adds a short message with an Undo beside it: "Page 3 deleted" (§4.8).
+    pub fn toast_with_undo(&mut self, text: impl Into<String>) {
+        self.push_toast(Toast { text: text.into(), error: false, undo: true, shown_at: None });
+    }
+
+    fn push_toast(&mut self, toast: Toast) {
+        // The same words again are one message, shown from the start again.
+        self.notices.retain(|n| n.text != toast.text);
         if self.notices.len() >= MAX_NOTICES {
             self.notices.remove(0);
         }
-        self.notices.push(Notice { text, error });
+        self.notices.push(toast);
     }
 }
 
@@ -368,4 +459,52 @@ pub fn color_image(image: &Rgb8) -> egui::ColorImage {
         rgb.push(pixel[2]);
     }
     egui::ColorImage::from_rgb([width, height], &rgb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toast(error: bool) -> Toast {
+        Toast { text: "Page 3 deleted".to_owned(), error, undo: true, shown_at: Some(100.0) }
+    }
+
+    #[test]
+    fn a_short_message_goes_after_five_seconds() {
+        let t = toast(false);
+        assert!(!t.expired(104.9));
+        assert!(t.expired(105.0));
+    }
+
+    #[test]
+    fn an_error_stays_until_it_is_closed() {
+        let t = toast(true);
+        assert!(!t.expired(100.0 + 3600.0));
+        assert_eq!(t.opacity(100.0 + 3600.0), 1.0);
+    }
+
+    #[test]
+    fn a_short_message_fades_over_its_last_moments() {
+        let t = toast(false);
+        assert_eq!(t.opacity(101.0), 1.0);
+        let fading = t.opacity(104.7);
+        assert!(fading > 0.0 && fading < 1.0, "{fading}");
+        assert_eq!(t.opacity(105.0), 0.0);
+    }
+
+    #[test]
+    fn a_message_that_has_not_been_drawn_has_no_clock_yet() {
+        let t = Toast { shown_at: None, ..toast(false) };
+        assert!(!t.expired(1e9));
+    }
+
+    #[test]
+    fn saying_the_same_thing_again_shows_it_again_from_the_start() {
+        let mut state = UiState::new();
+        state.toast_with_undo("Page 3 deleted");
+        state.notices[0].shown_at = Some(1.0);
+        state.toast_with_undo("Page 3 deleted");
+        assert_eq!(state.notices.len(), 1);
+        assert_eq!(state.notices[0].shown_at, None);
+    }
 }

@@ -79,15 +79,16 @@ impl ScanCraftUi {
                 },
             );
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.notice_strip(ui, &view);
-            match stage {
-                stepper::Stage::Import => import::import_screen(ui, &mut self.state, &view, engine),
-                stepper::Stage::Crop => crop::crop_screen(ui, &mut self.state, &view, engine),
-                stepper::Stage::Enhance => enhance::enhance_screen(ui, &mut self.state, &view, engine),
-                stepper::Stage::Export => self.export_screen(ui),
-            }
+        self.take_engine_notices(&view);
+        egui::CentralPanel::default().show(ui, |ui| match stage {
+            stepper::Stage::Import => import::import_screen(ui, &mut self.state, &view, engine),
+            stepper::Stage::Crop => crop::crop_screen(ui, &mut self.state, &view, engine),
+            stepper::Stage::Enhance => enhance::enhance_screen(ui, &mut self.state, &view, engine),
+            stepper::Stage::Export => self.export_screen(ui),
         });
+        // Files can be dropped on the window at any time, whatever it is showing.
+        self.handle_drop(ui, engine);
+        self.drop_overlay(ui, stage == stepper::Stage::Import);
         // The windows that float above the screens.
         if self.state.settings_open {
             export::settings_window(ui.ctx(), &mut self.state);
@@ -101,6 +102,9 @@ impl ScanCraftUi {
         if self.state.label_open {
             export::label_window(ui.ctx(), &mut self.state, &view, engine);
         }
+        // The messages float over everything, above the bars at the bottom.
+        let bottom = if show_tray { tray::BAR_HEIGHT } else { 0.0 } + stepper::STEP_BAR_HEIGHT + 12.0;
+        self.toasts(ui, engine, bottom);
     }
 
     /// Runs a menu item: the interface's own items, and the commands of the rest.
@@ -145,19 +149,29 @@ impl ScanCraftUi {
         self.state.loupe_visible(now)
     }
 
-    /// When the loupe stops showing, in the app's clock (§4.3).
+    /// Whether a handle is pressed and so holds the loupe open (§4.3).
+    pub fn loupe_held(&self) -> bool {
+        self.state.loupe.held
+    }
+
+    /// When a keyboard nudge's loupe stops showing, in the app's clock (§4.3).
     pub fn loupe_until(&self) -> Option<f64> {
-        self.state.loupe_until
+        self.state.loupe.until
     }
 
-    /// When the loupe was last shown, in the app's clock (§4.3).
+    /// When a keyboard nudge last showed the loupe, in the app's clock (§4.3).
     pub fn loupe_since(&self) -> Option<f64> {
-        self.state.loupe_since
+        self.state.loupe.since
     }
 
-    /// The messages the interface itself shows (§4.8).
-    pub fn notices(&self) -> &[Notice] {
-        &self.state.notices
+    /// The photo position the loupe magnifies, while it has one (§4.3).
+    pub fn loupe_focus(&self) -> Option<scancraft_core::geom::Point> {
+        self.state.loupe.focus
+    }
+
+    /// The messages the interface shows now (§4.8).
+    pub fn notices(&self) -> Vec<Notice> {
+        self.state.notices.iter().map(|toast| Notice { text: toast.text.clone(), error: toast.error }).collect()
     }
 
     /// Pushes ScanCraft's palette into the style, when the appearance changes.
@@ -170,13 +184,11 @@ impl ScanCraftUi {
         theme::apply(ctx);
     }
 
-    /// The messages of the engine and of the interface, in a strip at the top of the screen.
+    /// Takes the engine's messages into the interface's own list.
     ///
-    /// The engine holds a message for one poll, which is a frame or two: far too short to read,
-    /// and the strip made the whole screen jump down and back up as it came and went. So the
-    /// interface takes each message of the engine into its own list, where it stays until the
-    /// user dismisses it.
-    fn notice_strip(&mut self, ui: &mut egui::Ui, view: &ViewState) {
+    /// The engine holds a message for one poll, which is a frame or two: far too short to read. So
+    /// the interface takes each message of the engine once, and shows it itself.
+    fn take_engine_notices(&mut self, view: &ViewState) {
         let shown: Vec<String> = view.notices.iter().map(|n| n.text.clone()).collect();
         for notice in &view.notices {
             if !self.state.engine_notices_seen.contains(&notice.text) {
@@ -184,27 +196,112 @@ impl ScanCraftUi {
             }
         }
         self.state.engine_notices_seen = shown;
-        let rows: Vec<(String, bool)> = self.state.notices.iter().map(|n| (n.text.clone(), n.error)).collect();
-        if rows.is_empty() {
+    }
+
+    /// Draws the messages as toasts over the window, `bottom` points above its bottom edge.
+    ///
+    /// A toast takes no room in the layout, so nothing on the screen moves when one comes or
+    /// goes. A short one fades after five seconds; an error stays until it is closed. One that
+    /// has an Undo runs the general undo, which is right because the last thing done is what the
+    /// message is about.
+    fn toasts(&mut self, ui: &mut egui::Ui, engine: &mut dyn EngineApi, bottom: f32) {
+        let now = ui.input(|i| i.time);
+        for toast in &mut self.state.notices {
+            if toast.shown_at.is_none() {
+                toast.shown_at = Some(now);
+            }
+        }
+        self.state.notices.retain(|toast| !toast.expired(now));
+        if self.state.notices.is_empty() {
             return;
         }
-        let dismiss = self.state.text.t("Dismiss");
-        ui.vertical(|ui| {
-            for (text, error) in &rows {
-                notice_row(ui, text, *error);
-            }
-            if ui.button(dismiss).clicked() {
-                self.state.notices.clear();
-            }
-        });
-        ui.add_space(8.0);
+        // The next frame that has to change something: the fade's start, then every frame of it.
+        let next = self
+            .state
+            .notices
+            .iter()
+            .filter(|toast| !toast.error)
+            .filter_map(|toast| toast.shown_at.map(|at| at + state::TOAST_SECONDS - state::TOAST_FADE - now))
+            .fold(f64::INFINITY, f64::min);
+        if next <= 0.0 {
+            ui.ctx().request_repaint();
+        } else if next.is_finite() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next));
+        }
+        let mut undo = false;
+        let mut closed: Option<usize> = None;
+        let rows: Vec<(usize, state::Toast)> = self.state.notices.iter().cloned().enumerate().collect();
+        let undo_label = self.state.text.t("Undo");
+        let dismiss_label = self.state.text.t("Dismiss");
+        egui::Area::new(ui.make_persistent_id("scancraft.toasts"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -bottom])
+            .show(ui.ctx(), |ui| {
+                ui.vertical_centered(|ui| {
+                    for (index, toast) in &rows {
+                        ui.scope(|ui| {
+                            ui.set_opacity(toast.opacity(now));
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    theme::toast_icon(ui, toast.error);
+                                    ui.label(&toast.text);
+                                    if toast.undo && ui.button(&undo_label).clicked() {
+                                        undo = true;
+                                        closed = Some(*index);
+                                    }
+                                    if theme::close_button(ui, &dismiss_label).clicked() {
+                                        closed = Some(*index);
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+        if undo {
+            canvas::dispatch(&mut self.state, engine, scancraft_core::command::Command::EditUndo);
+        }
+        if let Some(index) = closed
+            && index < self.state.notices.len()
+        {
+            self.state.notices.remove(index);
+        }
+    }
+
+    /// Files dropped on the window, whatever it is showing, are added to the scan (§4.2).
+    fn handle_drop(&mut self, ui: &egui::Ui, engine: &mut dyn EngineApi) {
+        let dropped: Vec<String> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().into_owned()).collect());
+        if dropped.is_empty() {
+            return;
+        }
+        canvas::dispatch(&mut self.state, engine, scancraft_core::command::Command::ImportAdd { paths: dropped });
+    }
+
+    /// Tints the whole window, and says what a drop would do, while files are held over it. The
+    /// empty window draws its own, bigger one.
+    fn drop_overlay(&mut self, ui: &egui::Ui, has_own: bool) {
+        let hovering = ui.input(|i| !i.raw.hovered_files.is_empty());
+        if !hovering || has_own {
+            return;
+        }
+        let rect = ui.ctx().viewport_rect();
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.make_persistent_id("scancraft.drop-overlay")));
+        painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.1));
+        painter.rect_stroke(rect.shrink(6.0), 10.0, egui::Stroke::new(3.0, accent), egui::StrokeKind::Inside);
+        let label = self.state.text.t("Drop to add pages");
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(22.0), ui.visuals().text_color());
     }
 
     /// The Export screen: the export runs in the app shell, so the interface says so (§4.4).
     fn export_screen(&mut self, ui: &mut egui::Ui) {
         let text = self.state.text.t("Exporting the PDF…");
         ui.centered_and_justified(|ui| {
-            ui.label(text);
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label(text);
+            });
         });
     }
 
@@ -244,14 +341,6 @@ impl ScanCraftUi {
         });
         self.state.about_open = open;
     }
-}
-
-/// One message in the strip at the top of the screen.
-fn notice_row(ui: &mut egui::Ui, text: &str, error: bool) {
-    let colour = if error { theme::INVALID } else { ui.visuals().text_color() };
-    ui.horizontal(|ui| {
-        ui.colored_label(colour, text);
-    });
 }
 
 impl Default for ScanCraftUi {

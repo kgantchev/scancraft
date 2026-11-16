@@ -20,34 +20,55 @@ pub const STEP_SHIFT: f64 = 10.0;
 pub const STEP_OPTION: f64 = 0.25;
 
 /// Draws Screen 2.
+///
+/// A frame handles the pointer and the keyboard first, then reads the view again if that sent the
+/// engine a command, and draws from that: the handle, the outline and the loupe are all drawn
+/// where the hand has just put the corner, not where it was a frame ago.
 pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let Some(crop) = view.crop.as_ref() else {
         return;
     };
     photo_strip(ui, state, crop, engine);
     let area = ui.available_rect_before_wrap();
-    let (rect, _) = ui.allocate_exact_size(area.size(), Sense::hover());
+    // The canvas's own widget goes first, so the handles, made after it, are above it.
+    let (rect, background) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
     let display = engine.image(scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo));
     let Some(display) = display else {
+        theme::canvas_background(ui, rect);
+        canvas::waiting(ui, rect, &state.text.t("Preparing the photo…"));
         return;
     };
-    let canvas = Canvas::new(rect, &display, crop.photo_size);
+    if state.canvas_view_of != Some(crop.photo) {
+        state.canvas_view = crate::state::CanvasView::default();
+        state.canvas_view_of = Some(crop.photo);
+    }
+    let mut zoom_and_pan = state.canvas_view;
+    canvas::navigate(ui, rect, &background, &mut zoom_and_pan);
+    let canvas = Canvas::with_view(rect, &display, crop.photo_size, zoom_and_pan);
+    state.canvas_view = canvas.view;
+    // Pointer and keyboard first; the loupe is held open by whatever handle is pressed now.
+    state.loupe.held = false;
+    let mut changed = canvas::interact_handles(ui, &canvas, crop, state, engine);
+    changed |= keyboard(ui, state, crop, &canvas, engine);
+    let refreshed;
+    let crop = if changed {
+        refreshed = engine.view();
+        refreshed.crop.as_ref().unwrap_or(crop)
+    } else {
+        crop
+    };
     canvas::draw_canvas(ui, &canvas, crop, state, engine);
+    let painter = ui.painter_at(canvas.area);
     for outline in &crop.outlines {
-        let painter = ui.painter_at(canvas.workspace);
         canvas::draw_outline(&painter, &canvas, outline);
     }
-    for outline in &crop.outlines {
-        canvas::draw_handles(ui, &canvas, outline, state, engine);
-    }
-    canvas::draw_spine(ui, &canvas, crop, state, engine);
+    canvas::draw_handles(ui, &canvas, crop, state);
     if crop.not_found {
-        not_found_hint(ui, state, canvas.rect);
+        not_found_hint(ui, state, canvas.area);
     }
     if crop.suggest_split {
-        split_button(ui, state, crop, engine, canvas.rect);
+        split_button(ui, state, crop, engine, canvas.area);
     }
-    keyboard(ui, state, crop, &canvas, engine);
     // The loupe floats above everything, including the tray (§4.3).
     crate::loupe::draw(ui, &canvas, crop, state, engine);
 }
@@ -216,8 +237,8 @@ pub fn move_selection(crop: &CropView, selection: &Selection, dx: f64, dy: f64) 
     }
 }
 
-/// The keyboard model of Screen 2 (§4.3).
-fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, canvas: &Canvas, engine: &mut dyn EngineApi) {
+/// The keyboard model of Screen 2 (§4.3). Returns whether a command went to the engine.
+fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, _canvas: &Canvas, engine: &mut dyn EngineApi) -> bool {
     let now = ui.input(|i| i.time);
     let items = selectable_items(crop);
     let (tab, shift, escape) = ui.input(|i| (i.key_pressed(Key::Tab), i.modifiers.shift, i.key_pressed(Key::Escape)));
@@ -260,38 +281,35 @@ fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, canvas: &Canvas, engi
         _ => (0.0, 0.0),
     };
     if dx == 0.0 && dy == 0.0 {
-        return;
+        return false;
     }
-    let Some(selection) = state.selection else { return };
-    let Some(command) = move_selection(crop, &selection, dx, dy) else { return };
+    let Some(selection) = state.selection else { return false };
+    let Some(command) = move_selection(crop, &selection, dx, dy) else { return false };
     canvas::dispatch(state, engine, command);
-    // The loupe shows the corner that moved (§4.3).
-    if let Some(position) = selection_position(crop, canvas, &selection) {
-        state.show_loupe(now, position);
+    // The loupe shows the handle that moved, where it has moved to (§4.3). A nudge has no button
+    // to release, so the loupe stays for a second.
+    if let Some(point) = selection_point(crop, &selection) {
+        state.show_loupe(now, Point::new(point.x + dx, point.y + dy));
     }
+    true
 }
 
-/// Where a selection is on the screen, for the loupe after a keyboard nudge.
-fn selection_position(crop: &CropView, canvas: &Canvas, selection: &Selection) -> Option<Pos2> {
+/// Where a selection is in the photo, in photo pixels, for the loupe after a keyboard nudge.
+pub fn selection_point(crop: &CropView, selection: &Selection) -> Option<Point> {
     match *selection {
         Selection::Corner { page, corner } => {
             let outline = crop.outlines.iter().find(|o| o.page == page)?;
-            let point = crate::state::corner_point(&outline.corners, corner);
-            Some(canvas.photo_to_canvas(point))
+            Some(crate::state::corner_point(&outline.corners, corner))
         }
         Selection::Bend { page, side, index } => {
             let outline = crop.outlines.iter().find(|o| o.page == page)?;
-            let handles = canvas::bend_handles(outline, side);
-            let point = handles.get(index)?;
-            Some(canvas.photo_to_canvas(*point))
+            canvas::bend_handles(outline, side).get(index).copied()
         }
         Selection::Spine { photo, end } => {
             if crop.photo != photo {
                 return None;
             }
-            let spine = crop.spine?;
-            let point = spine.get(end)?;
-            Some(canvas.photo_to_canvas(*point))
+            crop.spine?.get(end).copied()
         }
     }
 }
