@@ -45,17 +45,36 @@ const SIGMA_SHARE: f64 = 0.12;
 pub struct CopyLines {
     pub lines: Vec<Vec<Point>>,
     pub direction: TextDirection,
-    /// The median piece height, for step 7's σ.
+    /// The median thickness of a piece of a line, in rows, for step 7's σ.
     pub median_piece_height: f64,
+}
+
+/// The densities A18's ink rule is defined for.
+const DPI_RANGE: (f64, f64) = (50.0, 1200.0);
+
+/// The density A18's rule is run at: the copy's own, held inside the range the rule is defined for.
+///
+/// A copy of a poster, or of a business card, has a density outside it; the rule's windows would
+/// stop making sense there, and the lines of text are still the lines of text.
+fn rule_density(dpi: f64) -> Result<f64, DetectError> {
+    if !(dpi.is_finite() && dpi > 0.0) {
+        return Err(scancraft_raster::RasterError::BadParameter("the copy's density must be a positive number").into());
+    }
+    Ok(dpi.clamp(DPI_RANGE.0, DPI_RANGE.1))
+}
+
+/// Steps 2–5 on a copy at `dpi` pixels per inch: the lines that run across the copy. A30 counts
+/// these at its gutter.
+pub(crate) fn lines_across(copy: &PlaneF32, dpi: f64) -> Result<CopyLines, DetectError> {
+    let ink = scancraft_raster::ink::midpoint_ink(copy, rule_density(dpi)?, INK_STRENGTH)?;
+    let found = track(&ink)?;
+    Ok(CopyLines { lines: found.lines, direction: TextDirection::Across, median_piece_height: found.median_piece_height })
 }
 
 /// Steps 2–6 on a copy at `dpi` pixels per inch. A29 and A30 call this on their own copies.
 pub fn lines_in_copy(copy: &PlaneF32, dpi: f64) -> Result<CopyLines, DetectError> {
-    if !(dpi.is_finite() && dpi > 0.0) {
-        return Err(scancraft_raster::RasterError::BadParameter("the copy's density must be a positive number").into());
-    }
     // Step 2: the ink, by A18's local rule.
-    let ink = scancraft_raster::ink::midpoint_ink(copy, dpi, INK_STRENGTH)?;
+    let ink = scancraft_raster::ink::midpoint_ink(copy, rule_density(dpi)?, INK_STRENGTH)?;
     let across = track(&ink)?;
     // Step 6: the same tracker on the copy turned a quarter turn.
     let turned_ink = turn(&ink)?;
@@ -67,7 +86,8 @@ pub fn lines_in_copy(copy: &PlaneF32, dpi: f64) -> Result<CopyLines, DetectError
     let (across_length, turned_length) = (mean_length(&across.lines), mean_length(&turned.lines));
     let use_turned = turned_length > 0.0 && turned_length >= DIRECTION_MARGIN * across_length;
     let (lines, direction, piece_height) = if use_turned {
-        (unturn(&turned.lines, turned_ink.height()), TextDirection::Down, turned.median_piece_height)
+        // The turned copy is as wide as the copy is tall.
+        (unturn(&turned.lines, turned_ink.width()), TextDirection::Down, turned.median_piece_height)
     } else {
         (across.lines, TextDirection::Across, across.median_piece_height)
     };
@@ -117,7 +137,7 @@ pub fn text_evidence(
 }
 
 /// The analysis copy of a page or spread, and the mapping that made it.
-pub(crate) struct Copy {
+pub(crate) struct AnalysisCopy {
     /// The straightened page, in the pyramid level's pixels.
     pub plane: PlaneF32,
     /// The homography from the unit square to the outline, in the level's pixels.
@@ -127,31 +147,34 @@ pub(crate) struct Copy {
     pub photo: (u32, u32),
 }
 
-impl Copy {
-    /// The photo position of the copy's pixel (x, y).
+impl AnalysisCopy {
+    /// The photo position of a point of the copy, in the copy's continuous coordinates: pixel `i`
+    /// spans `i` to `i + 1`, so its centre is `i + ½`. The tracker's points are in these
+    /// coordinates (a row's centre of mass is measured at `row + ½`).
     pub fn photo_position(&self, x: f64, y: f64) -> Option<Point> {
-        let u = (x + 0.5) / f64::from(self.plane.width()).max(1.0);
-        let v = (y + 0.5) / f64::from(self.plane.height()).max(1.0);
+        let u = x / f64::from(self.plane.width()).max(1.0);
+        let v = y / f64::from(self.plane.height()).max(1.0);
         let p = self.homography.apply(u, v)?;
-        let (sx, sy) = (f64::from(self.level.0) / f64::from(self.photo.0).max(1.0), f64::from(self.level.1) / f64::from(self.photo.1).max(1.0));
-        Some(Point::new(p.x / sx.max(1e-9), p.y / sy.max(1e-9)))
+        let (sx, sy) = self.level_scale();
+        Some(Point::new(p.x / sx, p.y / sy))
     }
 
-    /// The scale of the mapping at a copy pixel: how many photo pixels one copy pixel is.
-    pub fn scale_at(&self, x: f64, y: f64) -> f64 {
-        let u = (x + 0.5) / f64::from(self.plane.width()).max(1.0);
-        let v = (y + 0.5) / f64::from(self.plane.height()).max(1.0);
-        self.scale(u, v)
+    /// The level's pixels per photo pixel, along x and along y.
+    fn level_scale(&self) -> (f64, f64) {
+        let sx = f64::from(self.level.0) / f64::from(self.photo.0).max(1.0);
+        let sy = f64::from(self.level.1) / f64::from(self.photo.1).max(1.0);
+        (sx.max(1e-9), sy.max(1e-9))
     }
 
-    /// The scale of the mapping at a page point: how many photo pixels one copy pixel is.
+    /// How many photo pixels one copy pixel is at a point of the copy, in the copy's continuous
+    /// coordinates.
     ///
-    /// The homography's Jacobian gives the level's pixels per unit of the page's coordinates; the
-    /// copy's pixel is a step of 1/W and 1/H in those coordinates, and the level is smaller than
-    /// the photo by its own scale. The geometric mean of the two axes' scale is the number of
-    /// photo pixels one copy pixel is.
-    pub fn scale(&self, u: f64, v: f64) -> f64 {
-        let (sx, sy) = (f64::from(self.level.0) / f64::from(self.photo.0).max(1.0), f64::from(self.level.1) / f64::from(self.photo.1).max(1.0));
+    /// The homography's Jacobian gives the level's pixels per unit of the page's coordinates; a copy
+    /// pixel is a step of 1/W and 1/H in those, and the level is smaller than the photo by its own
+    /// scale. The square root of the Jacobian's determinant is the geometric mean of the two axes.
+    pub fn scale_at(&self, x: f64, y: f64) -> f64 {
+        let u = x / f64::from(self.plane.width()).max(1.0);
+        let v = y / f64::from(self.plane.height()).max(1.0);
         let [a, b, c, d, e, f, g, h] = self.homography.m;
         let w = g * u + h * v + 1.0;
         if w == 0.0 || !w.is_finite() {
@@ -163,23 +186,36 @@ impl Copy {
         let dxdv = (b * w - nx * h) / (w * w);
         let dydu = (d * w - ny * g) / (w * w);
         let dydv = (e * w - ny * h) / (w * w);
-        // The copy's pixels: a step of 1/W and 1/H in the page's coordinates, and the level's
-        // pixels are the photo's by the level's scale.
         let (du, dv) = (1.0 / f64::from(self.plane.width()).max(1.0), 1.0 / f64::from(self.plane.height()).max(1.0));
-        let j11 = dxdu * du / sx.max(1e-9);
-        let j12 = dxdv * dv / sx.max(1e-9);
-        let j21 = dydu * du / sy.max(1e-9);
-        let j22 = dydv * dv / sy.max(1e-9);
+        let (sx, sy) = self.level_scale();
+        let (j11, j12) = (dxdu * du / sx, dxdv * dv / sx);
+        let (j21, j22) = (dydu * du / sy, dydv * dv / sy);
         (j11 * j22 - j12 * j21).abs().sqrt().max(1e-9)
     }
+}
+
+/// The level of the pyramid a copy is made from: the coarsest one with at least `long_side` pixels
+/// across the page, or the finest when none has (A26 step 1: enough pixels across the page that the
+/// copy isn't aliased, and no more than needed).
+///
+/// The page's width is measured on the outline, in photo pixels, and scaled to each level.
+pub(crate) fn level_for<'a>(pyramid: &'a LumaPyramid, outline: &Quad, long_side: u32) -> Option<&'a PlaneF32> {
+    let photo_long = pyramid.full().map(|p| f64::from(p.width().max(p.height()))).filter(|l| *l > 0.0)?;
+    // The page's longest side in the photo, in pixels.
+    let page_long = outline.0.iter().zip(outline.0.iter().cycle().skip(1)).map(|(a, b)| a.distance(*b)).fold(0.0f64, f64::max);
+    pyramid
+        .levels
+        .iter()
+        .find(|level| page_long * f64::from(level.width().max(level.height())) / photo_long >= f64::from(long_side))
+        .or(pyramid.levels.last())
 }
 
 /// The copy of a page or spread with the given outline, and the mapping that made it.
 ///
 /// The outline is in photo pixels; the level of the pyramid may be smaller, so the outline is
 /// scaled into the level's pixels before the homography is built.
-pub(crate) fn copy_for(pyramid: &LumaPyramid, outline: &Quad, long_side: u32, size_mm: (f64, f64)) -> Result<Copy, DetectError> {
-    let level = pyramid.at_least(long_side).ok_or(scancraft_core::CoreError::BadSize { width: 0, height: 0 })?;
+pub(crate) fn copy_for(pyramid: &LumaPyramid, outline: &Quad, long_side: u32, size_mm: (f64, f64)) -> Result<AnalysisCopy, DetectError> {
+    let level = level_for(pyramid, outline, long_side).ok_or(scancraft_core::CoreError::BadSize { width: 0, height: 0 })?;
     let photo = pyramid.full().map(|p| (p.width(), p.height())).unwrap_or((level.width(), level.height()));
     let (lw, lh) = (level.width().max(1), level.height().max(1));
     let (pw, ph) = (photo.0.max(1), photo.1.max(1));
@@ -194,21 +230,24 @@ pub(crate) fn copy_for(pyramid: &LumaPyramid, outline: &Quad, long_side: u32, si
         (((f64::from(long_side) * width_mm / height_mm).round() as u32).max(1), long_side.max(1))
     };
     let plane = warp_luma(level, &homography, out_w, out_h)?;
-    Ok(Copy { plane, homography, level: (lw, lh), photo: (pw, ph) })
+    Ok(AnalysisCopy { plane, homography, level: (lw, lh), photo: (pw, ph) })
 }
 
 /// One piece of a text line, in a strip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Piece {
-    /// The height of the piece's ink, in the copy's rows.
+    /// The height of the piece's ink: the centre of mass of its rows, in the copy's continuous
+    /// coordinates.
     height: f64,
+    /// How many rows the piece is thick, which is what step 7's σ is a share of.
+    rows: usize,
 }
 
 /// The lines the tracker found in one direction.
 #[derive(Debug, Clone, PartialEq)]
 struct Tracked {
     lines: Vec<Vec<Point>>,
-    /// The median height of the pieces, in the copy's rows.
+    /// The median thickness of the pieces, in rows.
     median_piece_height: f64,
 }
 
@@ -228,9 +267,10 @@ fn track(ink: &BitPlane) -> Result<Tracked, DetectError> {
         sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
     };
     let lines = follow(&strips, w, page_gap);
-    let mut heights: Vec<f64> = strips.iter().flat_map(|s| s.iter().map(|p| p.height)).collect();
-    heights.sort_by(f64::total_cmp);
-    let median_piece_height = heights.get(heights.len() / 2).copied().unwrap_or(0.0);
+    // The median piece height of step 7: how many rows thick a piece of a line is.
+    let mut thicknesses: Vec<f64> = strips.iter().flat_map(|s| s.iter().map(|p| p.rows as f64)).collect();
+    thicknesses.sort_by(f64::total_cmp);
+    let median_piece_height = thicknesses.get(thicknesses.len() / 2).copied().unwrap_or(0.0);
     // Step 5: the lines seen in at least five strips, spanning 30 % of the width.
     let span = MIN_SPAN * f64::from(w);
     let kept: Vec<Vec<Point>> = lines
@@ -265,13 +305,8 @@ fn pieces_by_strip(ink: &BitPlane) -> Vec<Vec<Piece>> {
             *slot = count as f32;
         }
         // The counts smoothed over three rows, the edge row repeated at the border.
-        let mut smoothed = vec![0f32; h];
-        for (y, slot) in smoothed.iter_mut().enumerate() {
-            let a = counts[y.saturating_sub(1)];
-            let b = counts[y];
-            let c = counts[(y + 1).min(h - 1)];
-            *slot = (a + b + c) / 3.0;
-        }
+        let at = |y: usize| counts.get(y.min(h - 1)).copied().unwrap_or(0.0);
+        let smoothed: Vec<f32> = (0..h).map(|y| (at(y.saturating_sub(1)) + at(y) + at(y + 1)) / 3.0).collect();
         let highest = smoothed.iter().copied().fold(0.0f32, f32::max);
         if highest <= 0.0 {
             out.push(Vec::new());
@@ -310,7 +345,7 @@ fn pieces_by_strip(ink: &BitPlane) -> Vec<Vec<Piece>> {
             }
             if sum > 0.0 { moment / sum } else { (s as f64 + end as f64) / 2.0 + 0.5 }
         };
-        let pieces: Vec<Piece> = runs.iter().map(|&run| Piece { height: height_of(run) }).collect();
+        let pieces: Vec<Piece> = runs.iter().map(|&run| Piece { height: height_of(run), rows: run.1 + 1 - run.0 }).collect();
         out.push(pieces);
     }
     out
@@ -374,18 +409,23 @@ fn follow(strips: &[Vec<Piece>], width: u32, page_gap: f64) -> Vec<Vec<Point>> {
         let mut used_lines = vec![false; open.len()];
         let mut used_pieces = vec![false; pieces.len()];
         for (_, line, piece) in pairs {
-            if used_lines[line] || used_pieces[piece] {
+            let (Some(line_taken), Some(piece_taken), Some(open_line), Some(p)) =
+                (used_lines.get_mut(line), used_pieces.get_mut(piece), open.get_mut(line), pieces.get(piece))
+            else {
+                continue;
+            };
+            if *line_taken || *piece_taken {
                 continue;
             }
-            used_lines[line] = true;
-            used_pieces[piece] = true;
-            open[line].points.push(Point::new(x, pieces[piece].height));
-            open[line].misses = 0;
+            *line_taken = true;
+            *piece_taken = true;
+            open_line.points.push(Point::new(x, p.height));
+            open_line.misses = 0;
         }
         // The pieces that no line took start new lines — unless they lie within the tolerance of a
         // line, which means they are the other part of the same line's band of ink.
-        for (piece, p) in pieces.iter().enumerate() {
-            if used_pieces[piece] {
+        for (p, &taken) in pieces.iter().zip(&used_pieces) {
+            if taken {
                 continue;
             }
             let near = open.iter().any(|o| {
@@ -399,7 +439,7 @@ fn follow(strips: &[Vec<Piece>], width: u32, page_gap: f64) -> Vec<Vec<Point>> {
         // The lines that found nothing stay open for two strips.
         let mut kept = Vec::new();
         for (index, mut line) in open.drain(..).enumerate() {
-            if index < used_lines.len() && !used_lines[index] {
+            if used_lines.get(index) == Some(&false) {
                 line.misses += 1;
                 if line.misses > 2 {
                     done.push(line.points);
@@ -448,17 +488,59 @@ fn turn(ink: &BitPlane) -> Result<BitPlane, DetectError> {
 }
 
 /// The lines of the turned copy, back in the copy's own columns and rows.
-fn unturn(lines: &[Vec<Point>], turned_height: u32) -> Vec<Vec<Point>> {
-    lines
-        .iter()
-        .map(|points| {
-            points
-                .iter()
-                .map(|p| {
-                    // The turned copy's (x, y) came from the copy's (y, height − 1 − x).
-                    Point::new(p.y, f64::from(turned_height) - 1.0 - p.x)
-                })
-                .collect()
-        })
-        .collect()
+///
+/// `turned_width` is the turned copy's width, which is the copy's height. A quarter turn clockwise
+/// sends the continuous point (x, y) of the copy to (H − y, x), so (x′, y′) of the turned copy came
+/// from (y′, H − x′).
+fn unturn(lines: &[Vec<Point>], turned_width: u32) -> Vec<Vec<Point>> {
+    lines.iter().map(|points| points.iter().map(|p| Point::new(p.y, f64::from(turned_width) - p.x)).collect()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::level_for;
+    use scancraft_core::geom::{Point, Quad};
+    use scancraft_core::image::Plane;
+    use scancraft_core::pyramid::LumaPyramid;
+
+    /// A pyramid of a 3000 × 2000 photo: levels of 1024, 2048 and 3000 px.
+    fn pyramid() -> LumaPyramid {
+        LumaPyramid { levels: vec![Plane::new(1024, 683, 0.5).unwrap(), Plane::new(2048, 1365, 0.5).unwrap(), Plane::new(3000, 2000, 0.5).unwrap()] }
+    }
+
+    /// A page of `side` photo pixels along its longest side, upright.
+    fn page(side: f64) -> Quad {
+        Quad([Point::new(0.0, 0.0), Point::new(side, 0.0), Point::new(side, side * 0.7), Point::new(0.0, side * 0.7)])
+    }
+
+    fn long_side(p: &LumaPyramid, outline: &Quad, want: u32) -> u32 {
+        let level = level_for(p, outline, want).unwrap();
+        level.width().max(level.height())
+    }
+
+    #[test]
+    fn the_level_is_the_coarsest_with_enough_pixels_across_the_page() {
+        let p = pyramid();
+        // A page that fills the photo: the 2048 px level has 2048 across it, the 1024 px level has 1024.
+        assert_eq!(long_side(&p, &page(3000.0), 1600), 2048);
+        // A page of 2400 photo pixels has 1638 across it at 2048 and 819 at 1024.
+        assert_eq!(long_side(&p, &page(2400.0), 1600), 2048);
+        // A page of 1800 photo pixels has only 1229 across it at 2048, so the full photo is used.
+        assert_eq!(long_side(&p, &page(1800.0), 1600), 3000);
+        // A small page cannot reach 1600 at any level: the finest.
+        assert_eq!(long_side(&p, &page(400.0), 1600), 3000);
+        // A copy of 1000 px, as A30 makes, takes the coarsest level that holds the page at 1000.
+        assert_eq!(long_side(&p, &page(3000.0), 1000), 1024);
+        assert_eq!(long_side(&p, &page(1500.0), 1000), 2048);
+    }
+
+    #[test]
+    fn a_tilted_page_is_measured_along_its_longest_side() {
+        let p = pyramid();
+        // A diagonal page whose longest side is 2400 px.
+        let q = Quad([Point::new(100.0, 100.0), Point::new(1900.0, 1700.0), Point::new(1500.0, 2000.0), Point::new(100.0, 800.0)]);
+        let longest = q.0.iter().zip(q.0.iter().cycle().skip(1)).map(|(a, b)| a.distance(*b)).fold(0.0f64, f64::max);
+        assert!(longest > 2300.0);
+        assert_eq!(long_side(&p, &q, 1600), 2048);
+    }
 }

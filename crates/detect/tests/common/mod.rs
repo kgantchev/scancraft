@@ -362,3 +362,37 @@ pub fn middle_in_strip(copy: &PlaneF32, x0: u32, x1: u32, baseline: f64, x_heigh
     }
     moment / sum
 }
+
+/// The luma pyramid of a photo, as A10 builds it.
+pub fn pyramid_of(photo: &Rgb8) -> LumaPyramid {
+    let luma = scancraft_detect::detect::photo_luma(photo).expect("luma");
+    scancraft_detect::refine::build_pyramid(&luma).expect("pyramid")
+}
+
+/// Two A4 pages side by side with 10 pt text across the whole width, margins of 40 pt. With
+/// `stop_short` the text keeps 60 pt clear of the middle on each side, as a book's does.
+pub fn wide_text_sheet(stop_short: bool) -> Canvas {
+    let width = 2.0 * A4.0;
+    let mid = width / 2.0;
+    let mut c = Canvas::new((width, A4.1), PAPER).expect("sheet");
+    let mut rng = Xorshift64Star::new(21);
+    let mut baseline = 60.0;
+    while baseline < A4.1 - 40.0 {
+        let mut x = 40.0;
+        loop {
+            let word = WORDS[rng.below(WORDS.len() as u64) as usize];
+            let word_width = text_units(word) * 10.0 / UNITS_PER_EM;
+            if x + word_width > width - 40.0 {
+                break;
+            }
+            // A word that would reach into the clear space starts on the other side of it.
+            if stop_short && x + word_width > mid - 60.0 && x < mid + 60.0 {
+                x = mid + 60.0;
+                continue;
+            }
+            x = c.text(x, baseline, 10.0, word, INK) + glyph(' ').advance * 10.0 / UNITS_PER_EM;
+        }
+        baseline += 14.0;
+    }
+    c
+}
