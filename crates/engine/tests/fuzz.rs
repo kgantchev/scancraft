@@ -67,9 +67,21 @@ impl Fuzz {
                 }
                 return Command::ImportAdd { paths };
             }
+            // A label touches the disk, so it is rare too. Its folder is the one the photos were
+            // imported from (where a label can succeed) or a junk path (where it can't).
+            41..=90 => {
+                let folder = match self.rng.below(5) {
+                    0 => String::new(),
+                    1 => "\0".to_string(),
+                    2 => "/definitely/not/here".to_string(),
+                    _ => self.folder.clone(),
+                };
+                let category = self.pick(&["", "dark desk", "wood", "not a category", "\0"]).to_string();
+                return Command::ReferenceLabel { page: self.page(), folder, category };
+            }
             _ => {}
         }
-        match self.rng.below(22) {
+        match self.rng.below(23) {
             0 => Command::ImportDiscard { item: self.photo() },
             1 | 2 => Command::CropSetCorner { page: self.page(), corner: self.corner(), x: self.float(), y: self.float() },
             3 | 4 => Command::CropMoveSide { page: self.page(), side: self.side(), offset: self.float() },
@@ -91,6 +103,7 @@ impl Fuzz {
             18 => Command::PageDelete { page: self.page() },
             19 => Command::PageMove { from: self.index(), to: self.index() },
             20 => Command::PageEdit { page: self.page() },
+            21 => Command::PageOpenCrop { page: self.page() },
             _ => {
                 if self.rng.below(2) == 0 {
                     Command::EditUndo
@@ -168,6 +181,15 @@ fn run(seed: u64) {
     // The run did real work: plenty of commands went through, and pages reached the tray.
     assert!(accepted > ITERATIONS / 20, "only {accepted} commands were accepted");
     assert!(most_pages > 0, "no page ever reached the tray");
+    // Whatever labels were written, the reference loader reads them: a label file is never left
+    // half written or with a record it can't use.
+    let label_file = std::path::Path::new(&fuzz.folder).join("reference.json");
+    // Some label must have got through, or this checks nothing; the seeds are fixed, so it does.
+    assert!(label_file.exists(), "no label was written in the whole run");
+    let set = scancraft_synth::datasets::reference::load(std::path::Path::new(&fuzz.folder)).expect("the label file reads");
+    assert!(!set.samples.is_empty(), "the label file holds no usable label");
+    assert_eq!(set.skipped_count, 0, "a label the loader skips: {:?}", set.skipped);
+    assert!(set.samples.iter().all(|s| s.corners.is_some_and(|q| q.is_finite())));
     // Saved after all that, the session reads back.
     engine.flush();
     let session = engine.session_dir().clone();
@@ -209,6 +231,8 @@ fn every_command_id_has_a_command_and_parses_from_json() {
         r#"{"id":"page.delete","params":{"page":1}}"#,
         r#"{"id":"page.move","params":{"from":0,"to":1}}"#,
         r#"{"id":"page.edit","params":{"page":1}}"#,
+        r#"{"id":"page.open_crop","params":{"page":1}}"#,
+        r#"{"id":"reference.label","params":{"page":1,"folder":"/definitely/not/here","category":"wood"}}"#,
         r#"{"id":"export.pdf","params":{"path":"a.pdf","options":{"page_size":"Auto","quality":"Best","searchable":true,"languages":[]}}}"#,
         r#"{"id":"session.new"}"#,
         r#"{"id":"session.restore"}"#,

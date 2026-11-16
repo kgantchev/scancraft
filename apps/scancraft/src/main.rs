@@ -21,6 +21,8 @@ enum PanelAction {
     Import,
     /// The Save panel answered with the PDF's path.
     Export { options: ExportOptions },
+    /// The folder panel answered with the folder of the reference set the labels go to.
+    LabelFolder,
 }
 
 struct App {
@@ -87,6 +89,10 @@ impl App {
                     let dialog = FileDialog::save().title("Export to PDF").file_name(name).filter("PDF", &["pdf"]);
                     self.panels.ask(dialog, PanelAction::Export { options });
                 }
+                UiAction::ChooseLabelFolder => {
+                    let dialog = FileDialog::folder().title("Choose the reference set's folder");
+                    self.panels.ask(dialog, PanelAction::LabelFolder);
+                }
                 UiAction::OpenSettings | UiAction::ShowAbout => {
                     // The interface opens its own windows.
                 }
@@ -114,6 +120,11 @@ impl App {
                 (PanelAction::Export { options }, Answer::Paths(paths)) => {
                     if let Some(path) = paths.first() {
                         let _ = self.engine.dispatch(Command::ExportPdf { path: path.to_string_lossy().into_owned(), options });
+                    }
+                }
+                (PanelAction::LabelFolder, Answer::Paths(paths)) => {
+                    if let Some(folder) = paths.first() {
+                        self.ui.set_label_folder(folder.to_string_lossy().into_owned());
                     }
                 }
                 _ => {}

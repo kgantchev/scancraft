@@ -545,11 +545,44 @@ fn rotate_right_sends_page_rotate_by_one_quarter_turn() {
 }
 
 #[test]
-fn back_to_crop_sends_page_edit() {
+fn back_to_crop_opens_the_corners_screen() {
+    // It used to send page.edit, which reopens Screen 3, so the button did nothing.
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
     click_label(&mut harness, "Back to Crop");
-    assert_eq!(dispatched(&harness), vec![Command::PageEdit { page: PAGE }]);
+    assert_eq!(dispatched(&harness), vec![Command::PageOpenCrop { page: PAGE }]);
+}
+
+#[test]
+fn the_back_to_crop_menu_item_opens_the_corners_screen_too() {
+    for view in [enhance_view(), crop_view()] {
+        let bar = scancraft_ui_egui::build_menu_bar(&view);
+        let item = bar.items().into_iter().find(|item| item.label == "Back to Crop").expect("the Back to Crop item");
+        assert_eq!(scancraft_ui_egui::menu::command_of(&item.command), Some(Command::PageOpenCrop { page: PAGE }));
+    }
+}
+
+#[test]
+fn the_label_window_asks_for_a_folder_and_then_writes_the_label() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    {
+        let state = harness.state_mut();
+        state.0.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::LABEL_REFERENCE), &mut state.1);
+    }
+    harness.run();
+    // Without a folder the label can't be saved, and the window asks the shell for one.
+    click_label(&mut harness, "Choose folder…");
+    let actions = harness.state_mut().0.take_actions();
+    assert!(matches!(actions.as_slice(), [UiAction::ChooseLabelFolder]), "{actions:?}");
+    assert!(dispatched(&harness).is_empty(), "nothing is written before a folder is chosen");
+    // The shell answers with a folder; the label is written for the page on screen.
+    harness.state_mut().0.set_label_folder("/tmp/reference-set".to_string());
+    harness.run();
+    click_label(&mut harness, "Save label");
+    assert_eq!(
+        dispatched(&harness),
+        vec![Command::ReferenceLabel { page: PAGE, folder: "/tmp/reference-set".to_string(), category: "dark desk".to_string() }]
+    );
 }
 
 #[test]

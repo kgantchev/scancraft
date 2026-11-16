@@ -2,7 +2,9 @@
 
 use egui::{Ui, Vec2};
 
-use scancraft_core::recipe::{ExportOptions, PageOrder, PageSizeOption, Paper, Quality};
+use scancraft_core::command::Command;
+use scancraft_core::engine_api::{EngineApi, ViewState};
+use scancraft_core::recipe::{ExportOptions, PageId, PageOrder, PageSizeOption, Paper, Quality, REFERENCE_CATEGORIES};
 
 use crate::state::UiState;
 
@@ -171,4 +173,50 @@ pub fn default_export_options() -> ExportOptions {
 /// The space the settings window needs.
 pub fn settings_size() -> Vec2 {
     Vec2::new(420.0, 320.0)
+}
+
+/// The page a label is written for: the one on Screen 2, or else the one on Screen 3.
+fn labelled_page(view: &ViewState) -> Option<PageId> {
+    view.crop.as_ref().and_then(|crop| crop.outlines.first().map(|o| o.page)).or_else(|| view.enhance.as_ref().map(|e| e.page))
+}
+
+/// The window that writes a photo's corners into a reference set (specification §10.2).
+///
+/// The person adjusts the corners on Screen 2, as in any scanner, then picks the photo's category
+/// and the reference set's folder here. The corners written are the page's own, so a label is
+/// exactly what the person saw and dragged.
+pub fn label_window(ctx: &egui::Context, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+    let mut open = state.label_open;
+    let page = labelled_page(view);
+    egui::Window::new("Label for Reference Set").open(&mut open).resizable(false).show(ctx, |ui| {
+        if page.is_none() {
+            ui.label("Open a photo and adjust its corners first.");
+            return;
+        }
+        // The combo box's own label names it for a screen reader, which a separate label does not.
+        let current = REFERENCE_CATEGORIES.get(state.label_category).copied().unwrap_or(REFERENCE_CATEGORIES[0]);
+        egui::ComboBox::from_label("Category").selected_text(current).show_ui(ui, |ui| {
+            for (index, name) in REFERENCE_CATEGORIES.iter().enumerate() {
+                ui.selectable_value(&mut state.label_category, index, *name);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Folder");
+            match &state.label_folder {
+                Some(folder) => ui.label(folder.as_str()),
+                None => ui.label("No folder chosen"),
+            };
+            if ui.button("Choose folder…").clicked() {
+                state.actions.push(crate::state::UiAction::ChooseLabelFolder);
+            }
+        });
+        let ready = state.label_folder.is_some();
+        if ui.add_enabled(ready, egui::Button::new("Save label")).clicked()
+            && let (Some(page), Some(folder)) = (page, state.label_folder.clone())
+        {
+            let category = REFERENCE_CATEGORIES.get(state.label_category).copied().unwrap_or(REFERENCE_CATEGORIES[0]).to_owned();
+            crate::canvas::dispatch(state, engine, Command::ReferenceLabel { page, folder, category });
+        }
+    });
+    state.label_open = open;
 }

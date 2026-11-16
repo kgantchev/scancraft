@@ -61,7 +61,7 @@ fn enhance_toolbar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
         }
         let back = state.text.t("Back to Crop");
         if ui.button(back).clicked() {
-            canvas::dispatch(state, engine, Command::PageEdit { page });
+            canvas::dispatch(state, engine, Command::PageOpenCrop { page });
         }
         let add = state.text.t(if enhance.more_to_come { "Add Page & Next" } else { "Add Page" });
         if ui.button(add).clicked() {

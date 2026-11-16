@@ -39,12 +39,14 @@ impl Engine {
         }
         match command {
             Command::EditUndo => {
-                let snap = self.undo.undo().ok_or_else(|| EngineError::msg("There is nothing to undo."))?;
+                let now = self.snapshot();
+                let snap = self.undo.undo(&now).ok_or_else(|| EngineError::msg("There is nothing to undo."))?;
                 self.restore(snap);
                 return Ok(());
             }
             Command::EditRedo => {
-                let snap = self.undo.redo().ok_or_else(|| EngineError::msg("There is nothing to redo."))?;
+                let now = self.snapshot();
+                let snap = self.undo.redo(&now).ok_or_else(|| EngineError::msg("There is nothing to redo."))?;
                 self.restore(snap);
                 return Ok(());
             }
@@ -61,7 +63,7 @@ impl Engine {
                     let after = self.snapshot();
                     if after != before {
                         let at_ms = self.now_ms();
-                        self.undo.record(UndoStep { command, before, after, at_ms });
+                        self.undo.record(UndoStep::new(command, &before, &after, at_ms));
                     }
                 }
                 Ok(())
@@ -98,6 +100,8 @@ impl Engine {
             Command::PageDelete { page } => self.page_delete(*page),
             Command::PageMove { from, to } => self.page_move(*from, *to),
             Command::PageEdit { page } => self.page_edit(*page),
+            Command::PageOpenCrop { page } => self.page_open_crop(*page),
+            Command::ReferenceLabel { page, folder, category } => self.reference_label(*page, folder, category),
             Command::ExportPdf { path, options } => self.export_pdf_command(path, options),
             Command::SessionNew => self.session_new(),
             Command::SessionRestore => self.session_restore(),
@@ -750,6 +754,99 @@ impl Engine {
         self.current_photo = Some(photo);
         self.current_page = Some(id);
         self.screen = Screen::Enhance(id);
+        Ok(())
+    }
+
+    /// Opens the corners screen for a page, with that page's corners ("Back to Crop", §4.7).
+    fn page_open_crop(&mut self, id: PageId) -> Result<(), EngineError> {
+        let page = self.session.page(id).ok_or(EngineError::NoPage(id))?;
+        let photo = page.photo;
+        self.last_look = page.look;
+        self.current_photo = Some(photo);
+        self.current_page = Some(id);
+        self.screen = Screen::Crop(photo);
+        Ok(())
+    }
+
+    /// Writes the page's corners into a reference set's label file (specification §10.2).
+    ///
+    /// The label file is `reference.json` in the folder, with one record per photo: the file's
+    /// name, the SHA-256 of its bytes, the category, the corners in photo pixels and the page's
+    /// ratio. A record for a photo that is already there is replaced, so a photo can be labelled
+    /// again after its corners were corrected.
+    fn reference_label(&mut self, id: PageId, folder: &str, category: &str) -> Result<(), EngineError> {
+        let category = category.trim();
+        if category.is_empty() {
+            return Err(EngineError::msg("Choose a category for the label."));
+        }
+        // The loader skips a record whose category is not one of the 18, so a label with any
+        // other is refused here, where it can be put right, and not skipped later without a word.
+        if !scancraft_core::recipe::REFERENCE_CATEGORIES.contains(&category) {
+            return Err(EngineError::msg(format!("{category:?} is not one of the reference set's categories.")));
+        }
+        let folder = folder.trim();
+        if folder.is_empty() {
+            return Err(EngineError::msg("Choose the folder the reference set is in."));
+        }
+        let page = self.session.page(id).ok_or(EngineError::NoPage(id))?;
+        let photo = self.session.photo(page.photo).ok_or(EngineError::NoPhoto(page.photo))?;
+        // A PDF or TIFF page has no file of its own, and the pages of one file share its name.
+        if !matches!(photo.origin, ImportOrigin::File) {
+            return Err(EngineError::msg("A page of a PDF or TIFF can't be labelled: label the photo of it instead."));
+        }
+        // The label names the file and its hash, and the reference loader looks for both in the
+        // folder. A label for a photo that isn't there, or has changed, would be skipped when the
+        // set is read, without a word, so it is refused here, where the person can fix it.
+        let in_folder = std::path::Path::new(folder).join(&photo.name);
+        match read_capped(&in_folder) {
+            Ok(bytes) if scancraft_io::import::source_id(&bytes) == photo.source.0 => {}
+            Ok(_) => {
+                return Err(EngineError::msg(format!("{} in that folder is not the photo that was imported.", photo.name)));
+            }
+            Err(_) => {
+                return Err(EngineError::msg(format!("Put {} in that folder first, so the label can find it.", photo.name)));
+            }
+        }
+        // Only what the person marked: the corners, and for a spread the spine. The page's ratio
+        // is the pipeline's own estimate (A11), and writing it here would make the ratio gate
+        // measure itself. A photo of a book spread is cut into two pages whose corners are halves
+        // of it; what the photo's label holds is the whole spread's outline and its spine, which
+        // both halves share, so labelling either half writes the same record.
+        let (outline, spine) = match &page.spread {
+            Some(half) => (half.spread_corners, Some(half.spine)),
+            None => (page.corners, None),
+        };
+        let corners = outline.0.map(|p| [p.x, p.y]);
+        let mut record = serde_json::json!({
+            "file": photo.name,
+            "sha256": photo.source.0,
+            "category": category,
+            "corners": corners,
+        });
+        if let (Some(spine), Some(object)) = (spine, record.as_object_mut()) {
+            object.insert("spine".to_owned(), serde_json::json!(spine.map(|p| [p.x, p.y])));
+        }
+        let path = std::path::Path::new(folder).join("reference.json");
+        let mut photos: Vec<serde_json::Value> = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let text = String::from_utf8(bytes).map_err(|_| EngineError::msg("The label file is not text."))?;
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| EngineError::msg(format!("The label file could not be read: {e}")))?;
+                match value.get("photos").and_then(serde_json::Value::as_array) {
+                    Some(photos) => photos.clone(),
+                    None => Vec::new(),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(EngineError::msg(format!("The label file could not be read: {e}"))),
+        };
+        // The photo's own record is replaced; the others are kept.
+        let name = photo.name.as_str();
+        photos.retain(|p| p.get("file").and_then(serde_json::Value::as_str) != Some(name));
+        photos.push(record);
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "photos": photos })).map_err(|e| EngineError::msg(e.to_string()))?;
+        craft_atomic::atomic_write(&path, text.as_bytes()).map_err(|e| EngineError::msg(format!("The label file could not be written: {e}")))?;
+        self.notify(format!("{} was labelled as {category}.", photo.name), false);
         Ok(())
     }
 

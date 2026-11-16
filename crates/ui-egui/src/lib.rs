@@ -64,6 +64,9 @@ impl ScanCraftUi {
         if self.state.about_open {
             self.about_window(ui.ctx());
         }
+        if self.state.label_open {
+            export::label_window(ui.ctx(), &mut self.state, &view, engine);
+        }
     }
 
     /// Runs a menu item: the interface's own items, and the commands of the rest.
@@ -89,7 +92,13 @@ impl ScanCraftUi {
 
     /// Whether a window of the interface is open, so the menu's items are greyed out.
     pub fn is_modal(&self) -> bool {
-        self.state.settings_open || self.state.export_popover || self.state.about_open
+        self.state.settings_open || self.state.export_popover || self.state.about_open || self.state.label_open
+    }
+
+    /// Sets the folder of the reference set the labels are written to, after the folder panel
+    /// answered.
+    pub fn set_label_folder(&mut self, folder: String) {
+        self.state.label_folder = Some(folder);
     }
 
     /// The keyboard's selection on Screen 2 (§4.3).

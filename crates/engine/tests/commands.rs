@@ -736,3 +736,191 @@ fn the_session_is_written_at_most_once_a_second() {
     engine.poll();
     assert_ne!(on_disk(), saved, "a second after the save the change is written");
 }
+
+#[test]
+fn back_to_crop_opens_the_corners_screen_with_the_pages_corners() {
+    let dir = TempDir::new("opencrop");
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(&dir, services(quad));
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let (photo, page) = current(&engine);
+    engine.dispatch(Command::CropApply { photo }).unwrap();
+    assert!(matches!(engine.view().screen, Screen::Enhance(_)));
+    engine.dispatch(Command::PageOpenCrop { page }).unwrap();
+    let view = engine.view();
+    assert!(matches!(view.screen, Screen::Crop(p) if p == photo), "{:?}", view.screen);
+    let crop = view.crop.expect("Screen 2");
+    assert_eq!(crop.outlines.len(), 1);
+    assert_eq!(crop.outlines[0].page, page);
+    // The corners are the ones the page had.
+    for (got, want) in crop.outlines[0].corners.0.iter().zip(quad.0.iter()) {
+        assert!(got.distance(*want) < 1.0, "{got:?} against {want:?}");
+    }
+}
+
+/// Imports the flat fixture from `set` (so the photo is in the reference folder) and returns its page.
+fn labelled_setup(dir: &TempDir, set: &TempDir) -> (scancraft_engine::Engine, PageId) {
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(dir, services(quad));
+    let path = write(set, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let (photo, page) = current(&engine);
+    engine.dispatch(Command::CropApply { photo }).unwrap();
+    settle(&mut engine);
+    (engine, page)
+}
+
+#[test]
+fn a_label_is_written_and_written_again() {
+    let dir = TempDir::new("label");
+    let set = TempDir::new("labelset");
+    let (mut engine, page) = labelled_setup(&dir, &set);
+    let folder = set.path().to_string_lossy().into_owned();
+    engine.dispatch(Command::ReferenceLabel { page, folder: folder.clone(), category: "dark desk".to_string() }).unwrap();
+    let text = std::fs::read_to_string(set.join("reference.json")).expect("the label file");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let photos = value["photos"].as_array().expect("the photos");
+    assert_eq!(photos.len(), 1, "{text}");
+    assert_eq!(photos[0]["file"], "flat.png");
+    assert_eq!(photos[0]["category"], "dark desk");
+    assert_eq!(photos[0]["sha256"].as_str().map(str::len), Some(64));
+    let corners = photos[0]["corners"].as_array().expect("the corners");
+    assert_eq!(corners.len(), 4);
+    // Labelling the same photo again replaces its record, and keeps the others.
+    engine.dispatch(Command::ReferenceLabel { page, folder: folder.clone(), category: "wood".to_string() }).unwrap();
+    let text = std::fs::read_to_string(set.join("reference.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let photos = value["photos"].as_array().unwrap();
+    assert_eq!(photos.len(), 1, "{text}");
+    assert_eq!(photos[0]["category"], "wood");
+    // A blank category, one that is not among the 18, and a blank folder are refused.
+    assert!(engine.dispatch(Command::ReferenceLabel { page, folder: folder.clone(), category: "  ".to_string() }).is_err());
+    let error = engine.dispatch(Command::ReferenceLabel { page, folder: folder.clone(), category: "a nice photo".to_string() }).unwrap_err();
+    assert!(error.contains("a nice photo"), "{error}");
+    // The refused label left the one before it in place.
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(set.join("reference.json")).unwrap()).unwrap();
+    assert_eq!(value["photos"][0]["category"], "wood");
+    assert!(engine.dispatch(Command::ReferenceLabel { page, folder: " ".to_string(), category: "wood".to_string() }).is_err());
+}
+
+#[test]
+fn a_label_holds_the_corners_and_nothing_the_pipeline_guessed() {
+    let dir = TempDir::new("label-truth");
+    let set = TempDir::new("label-truth-set");
+    let (mut engine, page) = labelled_setup(&dir, &set);
+    let folder = set.path().to_string_lossy().into_owned();
+    engine.dispatch(Command::ReferenceLabel { page, folder, category: "dark desk".to_string() }).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(set.join("reference.json")).unwrap()).unwrap();
+    let record = &value["photos"][0];
+    // The ratio on the page is the pipeline's estimate (A11), and a label is the person's truth.
+    assert!(record.get("ratio").is_none(), "the label carries the pipeline's own ratio: {record}");
+    // And the reference loader reads it: the file is there, and its bytes hash to the label's.
+    let loaded = scancraft_synth::datasets::reference::load(set.path()).unwrap();
+    assert_eq!(loaded.samples.len(), 1, "skipped: {:?}", loaded.skipped);
+    assert!(loaded.samples[0].corners.is_some());
+}
+
+#[test]
+fn a_photo_that_is_not_in_the_reference_folder_is_not_labelled() {
+    // The label names the file and its hash, and the loader looks for both in the folder: a label
+    // for a photo kept elsewhere would be skipped when the set is read, and say nothing.
+    let dir = TempDir::new("label-elsewhere");
+    let elsewhere = TempDir::new("label-elsewhere-photos");
+    let set = TempDir::new("label-elsewhere-set");
+    let (mut engine, page) = labelled_setup(&dir, &elsewhere);
+    let folder = set.path().to_string_lossy().into_owned();
+    let error = engine.dispatch(Command::ReferenceLabel { page, folder, category: "wood".to_string() }).unwrap_err();
+    assert!(error.contains("flat.png"), "{error}");
+    assert!(!set.join("reference.json").exists(), "a label file was written for a photo that is not in the folder");
+}
+
+#[test]
+fn a_photo_with_the_same_name_and_other_bytes_is_not_labelled() {
+    let dir = TempDir::new("label-changed");
+    let set = TempDir::new("label-changed-set");
+    let (mut engine, page) = labelled_setup(&dir, &set);
+    // Another picture with the name of the one that was imported.
+    std::fs::write(set.join("flat.png"), desk_png(9)).unwrap();
+    let folder = set.path().to_string_lossy().into_owned();
+    assert!(engine.dispatch(Command::ReferenceLabel { page, folder, category: "wood".to_string() }).is_err());
+    assert!(!set.join("reference.json").exists());
+}
+
+#[test]
+fn a_page_of_a_pdf_is_not_labelled() {
+    // A PDF page is not a photo with a file of its own, so a label for it could never be read back.
+    let dir = TempDir::new("label-pdf");
+    let set = TempDir::new("label-pdf-set");
+    let mut picture = Vec::new();
+    for y in 0..40 {
+        for x in 0..30 {
+            picture.push([200 - (x * 3) as u8, 210, 220 - (y * 2) as u8]);
+        }
+    }
+    let image = scancraft_core::image::Plane::from_vec(30, 40, picture).unwrap();
+    let encoded = scancraft_io::encode::encode(&scancraft_io::encode::PageImage::Colour(image), scancraft_core::recipe::Quality::Small).unwrap();
+    let pages: Vec<scancraft_io::pdf_write::PdfPage> = (0..2)
+        .map(|_| scancraft_io::pdf_write::PdfPage {
+            image: encoded.clone(),
+            size_pt: (595.0, 842.0),
+            image_rect_pt: [0.0, 0.0, 595.0, 842.0],
+            text: None,
+        })
+        .collect();
+    let path = set.join("two.pdf");
+    scancraft_io::pdf_write::write_pdf(&pages, &scancraft_io::pdf_write::DocInfo { title: "two".to_string(), producer: "test".to_string() }, &path)
+        .unwrap();
+    let mut engine = open(&dir, services(desk_quad()));
+    engine.dispatch(Command::ImportAdd { paths: vec![path.to_string_lossy().into_owned()] }).unwrap();
+    settle(&mut engine);
+    let (_, page) = current(&engine);
+    let folder = set.path().to_string_lossy().into_owned();
+    let error = engine.dispatch(Command::ReferenceLabel { page, folder, category: "receipt".to_string() }).unwrap_err();
+    assert!(error.contains("PDF"), "{error}");
+    assert!(!set.join("reference.json").exists());
+}
+
+#[test]
+fn a_book_spread_is_labelled_with_the_whole_spread_and_its_spine() {
+    // The photo is cut into two pages whose corners are halves of the spread. The truth of the
+    // photo is the spread's outline and its spine; a half's corners would be wrong, and the second
+    // half would replace the first.
+    let dir = TempDir::new("label-spread");
+    let set = TempDir::new("label-spread-set");
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(&dir, services(quad));
+    let path = write(&set, "spread.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let (photo, _) = current(&engine);
+    engine.dispatch(Command::CropBook { on: true }).unwrap();
+    engine.dispatch(Command::CropSetSpine { photo, top: Point::new(430.0, 70.0), bottom: Point::new(450.0, 590.0) }).unwrap();
+    let crop = engine.view().crop.unwrap();
+    assert_eq!(crop.outlines.len(), 2);
+    let (left, right) = (crop.outlines[0].page, crop.outlines[1].page);
+    let folder = set.path().to_string_lossy().into_owned();
+    let label = |engine: &mut scancraft_engine::Engine, page| {
+        engine.dispatch(Command::ReferenceLabel { page, folder: folder.clone(), category: "book spread".to_string() }).unwrap();
+        let text = std::fs::read_to_string(set.join("reference.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()
+    };
+    let from_left = label(&mut engine, left);
+    let from_right = label(&mut engine, right);
+    // One record for the photo whichever half was labelled, and the same one.
+    assert_eq!(from_left["photos"].as_array().unwrap().len(), 1);
+    assert_eq!(from_left, from_right);
+    let record = &from_left["photos"][0];
+    // The spine is there, and it is the one that was set.
+    assert_eq!(record["spine"], serde_json::json!([[430.0, 70.0], [450.0, 590.0]]));
+    // The corners are the spread's, so the spine lies between the left and right sides.
+    let corners = record["corners"].as_array().unwrap();
+    let (left_x, right_x) = (corners[0][0].as_f64().unwrap(), corners[1][0].as_f64().unwrap());
+    assert!(left_x < 430.0 && 450.0 < right_x, "the spine is not inside the labelled outline: {corners:?}");
+    // The loader reads it back with the spine.
+    let loaded = scancraft_synth::datasets::reference::load(set.path()).unwrap();
+    assert_eq!(loaded.samples.len(), 1, "skipped: {:?}", loaded.skipped);
+    assert!(loaded.samples[0].spine.is_some());
+}

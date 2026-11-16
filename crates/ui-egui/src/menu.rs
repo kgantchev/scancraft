@@ -20,6 +20,7 @@ pub const ABOUT: &str = "app.about";
 pub const SETTINGS: &str = "app.settings";
 pub const IMPORT: &str = "file.open";
 pub const EXPORT_OPTIONS: &str = "file.export_options";
+pub const LABEL_REFERENCE: &str = "file.label_reference";
 pub const PREVIOUS_PHOTO: &str = "page.previous";
 pub const NEXT_PHOTO: &str = "page.next";
 pub const TOGGLE_TRAY: &str = "view.toggle_tray";
@@ -116,6 +117,7 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
                 Node::Item(item(CommandRef::new(IMPORT), "Import…", "Cmd+O")),
                 Node::Item(item(CommandRef::new("export.pdf"), "Export to PDF…", "Cmd+E")),
                 Node::Item(item(CommandRef::new(EXPORT_OPTIONS), "Export Options…", "Cmd+Alt+E")),
+                Node::Item(Item::new(CommandRef::new(LABEL_REFERENCE), "Label for Reference Set…")),
             ],
         )
         .role(MenuRole::File),
@@ -157,7 +159,7 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
         "Cmd+Alt+B",
     )));
     page_items.push(Node::Item(item(photo_command("crop.apply", photo), "Correct Perspective", "↩")));
-    page_items.push(Node::Item(item(page_command("page.edit", enhance_page.or(page), serde_json::Value::Null), "Back to Crop", "Cmd+[")));
+    page_items.push(Node::Item(item(page_command("page.open_crop", enhance_page.or(page), serde_json::Value::Null), "Back to Crop", "Cmd+[")));
     page_items.push(Node::Item(item(
         page_command("page.rotate", enhance_page.or(page), serde_json::json!({ "quarter_turns": -1 })),
         "Rotate Left",
@@ -224,6 +226,7 @@ pub fn handle_menu_command(command: &CommandRef, state: &mut UiState, view: &Vie
         SETTINGS => state.settings_open = true,
         IMPORT => state.actions.push(crate::state::UiAction::ImportFiles),
         EXPORT_OPTIONS => state.export_popover = !state.export_popover,
+        LABEL_REFERENCE => state.label_open = true,
         TOGGLE_TRAY => state.tray_hidden = !state.tray_hidden,
         PREVIOUS_PHOTO | NEXT_PHOTO => {
             state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
