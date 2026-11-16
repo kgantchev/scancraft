@@ -6,7 +6,7 @@ Every asset in this repository, with its author, source and licence.
 |---|---|---|---|
 | `fixtures/flat.png`, `fixtures/curved.png`, `fixtures/spread.png` and their `.json` truth files | ScanCraft contributors | Drawn by `cargo xtask fixtures` | MIT OR Apache-2.0 |
 | `crates/io/src/helvetica.rs` (the standard Helvetica advance widths, data from the published Core 14 metrics) | ArtCraft Team and the PdfCraft contributors | PdfCraft `crates/fonts/src/std14_metrics.rs`, commit c944f106dd63eb9a33c7348eed1f03548cbd6468 | MIT OR Apache-2.0 |
-| `apps/scancraft/assets/scancraft.svg`, `scancraft-1024.png`, `scancraft-256.png`, `ScanCraft.icns` (the app icon) | ScanCraft contributors | Vectorised from the project's `scancraft.jpeg` (specification §12.1 item 5); the PNGs and the `.icns` are rendered from the SVG | MIT OR Apache-2.0 |
+| `apps/scancraft/assets/scancraft.svg`, `scancraft-1024.png`, `scancraft-256.png`, `ScanCraft.icns` (the app icon) | ScanCraft maintainers, generated with Google Gemini under a paid subscription | Generated as `scancraft.jpeg` (specification §12.1 item 5), then vectorised to the SVG; the PNGs and the `.icns` are rendered from the SVG | MIT OR Apache-2.0, as the maintainers' licence for the generated output |
 
 ## Datasets the tests read
 
