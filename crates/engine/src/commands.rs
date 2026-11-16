@@ -139,7 +139,7 @@ impl Engine {
         }
         if imported == 0 {
             return Err(EngineError::msg(if problems.is_empty() {
-                "Those files were already imported.".to_string()
+                "Those files are already waiting to be corrected.".to_string()
             } else {
                 "No file could be imported.".to_string()
             }));
@@ -153,14 +153,22 @@ impl Engine {
         let kind = sniff(&bytes).ok_or_else(|| "this isn't a supported image or PDF.".to_string())?;
         let source = SourceId(scancraft_io::import::source_id(&bytes));
         let tiff_pages = if kind == Kind::Tiff { scancraft_io::import::tiff_page_count(&bytes) } else { 0 };
-        // The first item of the file: the same file (or the same page of it) twice is imported once.
+        // The first item of the file: the same file (or the same page of it) twice is imported once
+        // while the first is still waiting to be corrected, so a file dropped twice in a row doesn't
+        // make two photos. Once its page is in the tray (or was deleted), the file may be imported
+        // again: the user may want another scan of it, and has no other way to get it back.
         let first = match kind {
             Kind::Pdf => ImportOrigin::PdfPage { index: 0 },
             Kind::Tiff if tiff_pages > 1 => ImportOrigin::TiffPage { index: 0 },
             _ => ImportOrigin::File,
         };
-        if self.session.file().photos.iter().any(|p| p.source == source && p.origin == first) {
-            self.notify(format!("{name} was already imported."), false);
+        let waiting = self.session.file().photos.iter().any(|p| {
+            p.source == source
+                && p.origin == first
+                && (matches!(self.status.get(&p.id), Some(PhotoStatus::Pending)) || !self.pending_ids(p.id).is_empty())
+        });
+        if waiting {
+            self.notify(format!("{name} is already waiting to be corrected."), false);
             return Ok(0);
         }
         // The source is copied into the session before it is read, so the bytes can be moved into the

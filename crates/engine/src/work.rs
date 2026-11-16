@@ -15,6 +15,9 @@ use scancraft_core::recipe::{CornerOrigin, FlattenMode, Look, Page, PageId, Phot
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// How many failed jobs the engine remembers before it forgets them all.
+const MAX_FAILED_TAGS: usize = 1024;
+
 /// What a job hands back.
 pub(crate) enum JobOutput {
     Detected { photo: PhotoId, found: Box<DetectedPhoto> },
@@ -92,7 +95,7 @@ impl Engine {
             return Some(image);
         }
         let tag = tag_of(&["image", &plan.cache_key]);
-        if self.inflight.contains(&tag) {
+        if self.inflight.contains(&tag) || self.failed.contains(&tag) {
             return None;
         }
         let ctx = self.ctx();
@@ -379,6 +382,13 @@ impl Engine {
     }
 
     fn job_failed(&mut self, meta: JobMeta, e: EngineError) -> bool {
+        if meta.tag != 0 {
+            // Bounded: a long session with many edits must not grow it without end.
+            if self.failed.len() >= MAX_FAILED_TAGS {
+                self.failed.clear();
+            }
+            self.failed.insert(meta.tag);
+        }
         if meta.tag == tag_of(&["export"]) {
             if let Some(back) = self.exporting.take() {
                 self.screen = back;

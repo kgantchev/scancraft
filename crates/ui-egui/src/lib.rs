@@ -137,11 +137,20 @@ impl ScanCraftUi {
     }
 
     /// The messages of the engine and of the interface, in a strip at the top of the screen.
+    ///
+    /// The engine holds a message for one poll, which is a frame or two: far too short to read,
+    /// and the strip made the whole screen jump down and back up as it came and went. So the
+    /// interface takes each message of the engine into its own list, where it stays until the
+    /// user dismisses it.
     fn notice_strip(&mut self, ui: &mut egui::Ui, view: &ViewState) {
-        let mut rows: Vec<(String, bool)> = view.notices.iter().map(|n| (n.text.clone(), n.error)).collect();
-        let own: Vec<(String, bool)> = self.state.notices.iter().map(|n| (n.text.clone(), n.error)).collect();
-        let has_own = !own.is_empty();
-        rows.extend(own);
+        let shown: Vec<String> = view.notices.iter().map(|n| n.text.clone()).collect();
+        for notice in &view.notices {
+            if !self.state.engine_notices_seen.contains(&notice.text) {
+                self.state.notice(notice.text.clone(), notice.error);
+            }
+        }
+        self.state.engine_notices_seen = shown;
+        let rows: Vec<(String, bool)> = self.state.notices.iter().map(|n| (n.text.clone(), n.error)).collect();
         if rows.is_empty() {
             return;
         }
@@ -150,7 +159,7 @@ impl ScanCraftUi {
             for (text, error) in &rows {
                 notice_row(ui, text, *error);
             }
-            if has_own && ui.button(dismiss).clicked() {
+            if ui.button(dismiss).clicked() {
                 self.state.notices.clear();
             }
         });

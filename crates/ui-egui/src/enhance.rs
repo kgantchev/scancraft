@@ -87,11 +87,19 @@ fn page_canvas(ui: &mut Ui, state: &mut UiState, view: &ViewState, rect: Rect, p
     } else {
         ImageKey::LookPreview(enhance.page)
     };
-    let Some(image) = engine.image(key) else {
-        return;
-    };
-    let Some(texture) = state.texture_with(ui, key, image.clone(), TextureOptions::LINEAR) else {
-        return;
+    // While the engine renders the page in a new look, the canvas keeps the picture it had, so a
+    // click on a look changes the page at once and never blanks it.
+    let (texture, image) = match engine.image(key) {
+        Some(image) => {
+            let Some(texture) = state.texture_with(ui, key, image.clone(), TextureOptions::LINEAR) else {
+                return;
+            };
+            (texture, image)
+        }
+        None => match state.textures.get(&key) {
+            Some(previous) => (previous.handle.clone(), previous.image.clone()),
+            None => return,
+        },
     };
     theme::canvas_background(ui, rect);
     let size = (image.width() as f32, image.height() as f32);

@@ -37,6 +37,8 @@ use std::sync::Arc;
 /// The paths of §6.5, as long sides in pixels.
 pub const WORK_LONG_SIDE: u32 = 1024;
 pub const DISPLAY_LONG_SIDE: u32 = 3072;
+/// The lowest density a look is asked to work at: A18's ink rule accepts nothing below it.
+pub const MIN_RENDER_DPI: f64 = 50.0;
 pub const PREVIEW_LONG_SIDE: u32 = 1280;
 pub const FILTER_THUMB_LONG_SIDE: u32 = 512;
 pub const TRAY_THUMB_LONG_SIDE: u32 = 256;
@@ -504,7 +506,9 @@ pub fn render_small(
     let (full_w, full_h) = final_size(&geometry, page.quarter_turns, 300, page.look);
     let (w, h) = fit_long_side(full_w, full_h, long_side);
     let dpi = f64::from(w.max(h)) / (geometry.page_size_mm.0.max(geometry.page_size_mm.1) / 25.4);
-    let (out, notes) = render_page(ctx, photo, item, page, RenderSpec { size: (w, h), dpi: dpi.max(30.0), preview: true }, token)?;
+    // A small picture of a whole page is under 50 DPI, and A18's ink rule refuses a density below
+    // that. Without the floor the Black & White thumbnail of every page failed.
+    let (out, notes) = render_page(ctx, photo, item, page, RenderSpec { size: (w, h), dpi: dpi.max(MIN_RENDER_DPI), preview: true }, token)?;
     Ok((out.to_rgb8()?, notes))
 }
 

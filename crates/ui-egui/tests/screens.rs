@@ -929,6 +929,57 @@ fn the_notices_of_the_engine_are_shown() {
     assert!(shown_text(&harness).contains("IMG_9.jpg is not supported"), "the screen does not show the engine's message");
 }
 
+#[test]
+fn a_notice_of_the_engine_stays_until_it_is_dismissed() {
+    // The engine holds a notice for one poll, a frame or two. The strip used to come and go with
+    // it, and every screen jumped down and back up.
+    let mut view = crop_view();
+    view.notices = vec![Notice { text: "IMG_9.jpg is not supported".to_owned(), error: true }];
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    let with_notice = bounds_of(&harness, "Auto-Detect");
+    harness.state_mut().1.set_view(crop_view());
+    harness.run();
+    assert!(shown_text(&harness).contains("IMG_9.jpg is not supported"), "the notice went when the engine let go of it");
+    assert_eq!(bounds_of(&harness, "Auto-Detect"), with_notice, "the screen moved when the engine let go of the notice");
+    click_label(&mut harness, "Dismiss");
+    assert!(!shown_text(&harness).contains("IMG_9.jpg is not supported"), "the notice stayed after Dismiss");
+}
+
+#[test]
+fn the_same_notice_twice_is_one_row() {
+    let one = |notices: Vec<Notice>| {
+        let mut view = crop_view();
+        view.notices = notices;
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        shown_text(&harness).matches("Same").count()
+    };
+    let single = one(vec![Notice { text: "Same".to_owned(), error: false }]);
+    let twice = one(vec![Notice { text: "Same".to_owned(), error: false }, Notice { text: "Same".to_owned(), error: false }]);
+    assert!(single >= 1 && twice == single, "one notice drew {single} times, and the same notice twice drew {twice}");
+}
+
+#[test]
+fn the_screen_stays_put_while_the_pointer_moves() {
+    for view in [import_view(), crop_view(), enhance_view()] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        let positions = |h: &Harness<TestState>| {
+            h.root()
+                .children_recursive()
+                .filter_map(|n| n.accesskit_node().raw_bounds().map(|b| (b.x0 as i32, b.y0 as i32, b.x1 as i32, b.y1 as i32)))
+                .collect::<Vec<_>>()
+        };
+        let before = positions(&harness);
+        for step in 0..60 {
+            harness.event(egui::Event::PointerMoved(egui::pos2(5.0 + (step as f32 * 37.0) % 1190.0, 5.0 + (step as f32 * 53.0) % 790.0)));
+            harness.step();
+            assert_eq!(positions(&harness), before, "the screen moved on step {step}");
+        }
+    }
+}
+
 // ------------------------------------------------------------ the determinism
 
 #[test]

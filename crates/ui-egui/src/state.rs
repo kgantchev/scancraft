@@ -180,6 +180,9 @@ pub struct UiState {
     pub settings: Settings,
     /// The messages the interface itself shows (§4.8).
     pub notices: Vec<Notice>,
+    /// The texts of the engine's notices the last frame showed, so a notice is taken into
+    /// [`UiState::notices`] once, however many frames the engine keeps it.
+    pub engine_notices_seen: Vec<String>,
     /// The uploaded images, by key.
     pub textures: HashMap<ImageKey, Texture>,
     /// The tray's drag: the index it started at and the index it is over.
@@ -195,6 +198,9 @@ pub struct UiState {
     /// The theme the palette was last applied for.
     pub theme: Option<egui::Theme>,
 }
+
+/// How many messages the strip keeps; the oldest goes when there are more.
+pub const MAX_NOTICES: usize = 8;
 
 impl UiState {
     /// The state of a fresh session.
@@ -216,6 +222,7 @@ impl UiState {
             export_options: ExportOptions::default(),
             settings: Settings::default(),
             notices: Vec::new(),
+            engine_notices_seen: Vec::new(),
             textures: HashMap::new(),
             tray_drag: None,
             tray_selected: None,
@@ -284,7 +291,14 @@ impl UiState {
 
     /// Adds a message for the user (§4.8).
     pub fn notice(&mut self, text: impl Into<String>, error: bool) {
-        self.notices.push(Notice { text: text.into(), error });
+        let text = text.into();
+        if self.notices.iter().any(|n| n.text == text) {
+            return;
+        }
+        if self.notices.len() >= MAX_NOTICES {
+            self.notices.remove(0);
+        }
+        self.notices.push(Notice { text, error });
     }
 }
 

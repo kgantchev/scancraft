@@ -127,6 +127,10 @@ pub struct Engine {
     pub(crate) images: HashMap<ImageKey, (String, Arc<Rgb8>)>,
     pub(crate) image_order: Vec<ImageKey>,
     pub(crate) inflight: HashSet<u64>,
+    /// The tags of jobs that failed. An image that failed is not asked for again until its recipe
+    /// changes (its tag changes with it): the interface asks for the same image every frame, and
+    /// a retry on every frame raised the same error notice on every frame.
+    pub(crate) failed: HashSet<u64>,
     pub(crate) pending_notices: Vec<Notice>,
     pub(crate) visible_notices: Vec<Notice>,
     pub(crate) export_confirmed: bool,
@@ -210,6 +214,7 @@ impl Engine {
             images: HashMap::new(),
             image_order: Vec::new(),
             inflight: HashSet::new(),
+            failed: HashSet::new(),
             pending_notices: Vec::new(),
             visible_notices: Vec::new(),
             export_confirmed: false,
@@ -348,6 +353,7 @@ impl Engine {
             t.cancel();
         }
         self.inflight.clear();
+        self.failed.clear();
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {

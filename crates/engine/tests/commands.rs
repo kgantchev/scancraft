@@ -349,6 +349,88 @@ fn to_screen_three(engine: &mut scancraft_engine::Engine) -> PageId {
     page
 }
 
+/// Asks for an image until the engine has it, polling as the app does between frames; the notices
+/// the engine showed on the way come back with it.
+fn wait_for_image(engine: &mut scancraft_engine::Engine, key: ImageKey) -> (Option<Arc<scancraft_core::image::Rgb8>>, Vec<String>) {
+    let mut notices = Vec::new();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < end {
+        engine.poll();
+        notices.extend(texts(&engine.view().notices));
+        if let Some(image) = engine.image(key) {
+            return (Some(image), notices);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    (None, notices)
+}
+
+#[test]
+fn every_look_has_a_filter_thumbnail_and_a_tray_thumbnail_without_an_error() {
+    // A thumbnail of a whole page is under 50 DPI. A18's ink rule refuses that density, so the
+    // Black & White thumbnail failed, and the interface, which asks for it on every frame, got an
+    // error notice on every frame.
+    let dir = TempDir::new("thumbs");
+    let mut engine = engine_with_photo(&dir);
+    let page = to_screen_three(&mut engine);
+    for look in [Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument] {
+        let (image, notices) = wait_for_image(&mut engine, ImageKey::FilterThumb(page, look));
+        assert!(image.is_some(), "no thumbnail for {look:?}; notices: {notices:?}");
+        assert!(notices.is_empty(), "the {look:?} thumbnail raised notices: {notices:?}");
+    }
+    engine.dispatch(Command::PageSetLook { page, look: Look::BlackWhite }).unwrap();
+    let (image, notices) = wait_for_image(&mut engine, ImageKey::TrayThumb(page));
+    assert!(image.is_some() && notices.is_empty(), "the Black & White tray thumbnail: {notices:?}");
+    let (image, notices) = wait_for_image(&mut engine, ImageKey::LookPreview(page));
+    assert!(image.is_some() && notices.is_empty(), "the Black & White preview: {notices:?}");
+}
+
+#[test]
+fn an_image_that_cannot_be_made_is_reported_once_not_on_every_request() {
+    let dir = TempDir::new("failing-image");
+    let mut engine = engine_with_photo(&dir);
+    let page = to_screen_three(&mut engine);
+    engine.dispatch(Command::PageAdd { page }).unwrap();
+    settle(&mut engine);
+    engine.flush();
+    drop(engine);
+    // A new run of the app opens the same session, with an empty memory, and the photo's file gone,
+    // so the page's thumbnail cannot be made.
+    let sources = dir.path().join("Scan A").join("sources");
+    for entry in std::fs::read_dir(&sources).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let mut engine = open(&dir, services(desk_quad()));
+    let page = engine.view().tray.first().map(|t| t.page).expect("the page is in the tray");
+    // The interface asks again on every frame.
+    let mut notices = Vec::new();
+    for _ in 0..300 {
+        engine.poll();
+        notices.extend(texts(&engine.view().notices));
+        assert!(engine.image(ImageKey::TrayThumb(page)).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(notices.len(), 1, "the same failure was reported {} times: {:?}", notices.len(), notices.first());
+}
+
+#[test]
+fn a_file_is_imported_again_once_its_page_is_in_the_tray() {
+    let dir = TempDir::new("reimport");
+    let mut engine = engine_with_photo(&dir);
+    let page = to_screen_three(&mut engine);
+    // While the photo waits to be corrected, importing it again makes no second photo.
+    let again = write(&dir, "desk0.png", &desk_png(0));
+    let _ = engine.dispatch(Command::ImportAdd { paths: vec![again.clone()] });
+    settle(&mut engine);
+    assert_eq!(engine.session().file().photos.len(), 1);
+    // Once its page is added, the same file can come in again.
+    engine.dispatch(Command::PageAdd { page }).unwrap();
+    engine.dispatch(Command::ImportAdd { paths: vec![again] }).unwrap();
+    settle(&mut engine);
+    assert_eq!(engine.session().file().photos.len(), 2);
+    assert!(matches!(engine.view().screen, Screen::Crop(_)));
+}
+
 #[test]
 fn looks_strengths_and_turns_follow_section_four_point_four() {
     let dir = TempDir::new("looks");
