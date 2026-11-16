@@ -24,6 +24,10 @@ pub fn empty_view() -> ViewState {
         busy: false,
         notices: Vec::new(),
         restore_offer: None,
+        importing: None,
+        reading_text: None,
+        exporting: None,
+        last_export: None,
     }
 }
 

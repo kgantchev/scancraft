@@ -2,7 +2,7 @@
 
 use crate::crop::invalid_reason;
 use crate::{Engine, PhotoStatus};
-use scancraft_core::engine_api::{CropView, EnhanceView, OutlineView, Screen, TrayItem, ViewState};
+use scancraft_core::engine_api::{CropView, EnhanceView, OutlineView, PageState, Screen, TrayItem, ViewState};
 use scancraft_core::geom::Point;
 use scancraft_core::recipe::{CornerOrigin, Page, PhotoId, TurnOrigin};
 use scancraft_geom::sheet::unroll;
@@ -23,13 +23,26 @@ impl Engine {
                 Screen::Enhance(page) => self.enhance_view(page),
                 _ => None,
             },
-            tray: file.pages.iter().enumerate().map(|(i, p)| TrayItem { page: p.id, number: i as u32 + 1, text_ready: p.text.is_some() }).collect(),
+            // Every page in the document is a finished one for now: the states that say a page is
+            // still being made, or needs a look, are the engine's to set (the review-first flow).
+            tray: file
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| TrayItem { page: p.id, photo: p.photo, number: i as u32 + 1, text_ready: p.text.is_some(), state: PageState::Ready })
+                .collect(),
             book_spreads: file.book_spreads,
             can_undo: self.undo.can_undo(),
             can_redo: self.undo.can_redo(),
             busy: self.jobs.pending() > 0,
             notices: self.visible_notices.clone(),
             restore_offer: self.restore_offer,
+            // Progress and the last export's summary are the engine's to report (the review-first
+            // flow); until then nothing says a piece of work is running or has finished.
+            importing: None,
+            reading_text: None,
+            exporting: None,
+            last_export: None,
         }
     }
 

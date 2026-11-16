@@ -167,6 +167,9 @@ impl Engine {
 
     fn image_plan(&self, key: ImageKey) -> Option<ImagePlan> {
         match key {
+            // The contract has the unfiltered preview (Show Original); the engine does not make
+            // it yet, so it is never ready.
+            ImageKey::OriginalPreview(_) => None,
             ImageKey::DisplayCopy(photo) => {
                 let item = self.session.photo(photo)?.clone();
                 let cache_key = display_key(&item.source, crate::pipeline::photo_key(&item.source, &item.origin).1);

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use scancraft_core::command::{Command, Corner};
-use scancraft_core::engine_api::{CropView, EnhanceView, ImageKey, Notice, OutlineView, PhotoTab, Screen, TrayItem, ViewState};
+use scancraft_core::engine_api::{CropView, EnhanceView, ImageKey, Notice, OutlineView, PageState, PhotoTab, Screen, TrayItem, ViewState};
 use scancraft_core::geom::{Point, Quad, Side};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{CornerOrigin, Detector, FlattenDecision, FlattenMode, FlattenReason, Half, Look, PageId, PhotoId, SideShape};
@@ -83,13 +83,17 @@ fn crop_view() -> ViewState {
             not_found: false,
         }),
         enhance: None,
-        tray: vec![TrayItem { page: PageId(10), number: 1, text_ready: true }],
+        tray: vec![TrayItem { page: PageId(10), photo: PhotoId(110), number: 1, text_ready: true, state: PageState::Ready }],
         book_spreads: false,
         can_undo: false,
         can_redo: false,
         busy: false,
         notices: Vec::new(),
         restore_offer: None,
+        importing: None,
+        reading_text: None,
+        exporting: None,
+        last_export: None,
     }
 }
 
@@ -110,9 +114,9 @@ fn enhance_view() -> ViewState {
             more_to_come: true,
         }),
         tray: vec![
-            TrayItem { page: PageId(10), number: 1, text_ready: true },
-            TrayItem { page: PageId(11), number: 2, text_ready: false },
-            TrayItem { page: PageId(12), number: 3, text_ready: true },
+            TrayItem { page: PageId(10), photo: PhotoId(110), number: 1, text_ready: true, state: PageState::Ready },
+            TrayItem { page: PageId(11), photo: PhotoId(111), number: 2, text_ready: false, state: PageState::Ready },
+            TrayItem { page: PageId(12), photo: PhotoId(112), number: 3, text_ready: true, state: PageState::Ready },
         ],
         book_spreads: false,
         can_undo: true,
@@ -120,6 +124,10 @@ fn enhance_view() -> ViewState {
         busy: false,
         notices: Vec::new(),
         restore_offer: None,
+        importing: None,
+        reading_text: None,
+        exporting: None,
+        last_export: None,
     }
 }
 
@@ -136,6 +144,10 @@ fn import_view() -> ViewState {
         busy: false,
         notices: Vec::new(),
         restore_offer: Some(7),
+        importing: None,
+        reading_text: None,
+        exporting: None,
+        last_export: None,
     }
 }
 

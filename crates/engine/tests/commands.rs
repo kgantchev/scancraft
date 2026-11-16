@@ -134,6 +134,42 @@ fn a_photo_that_is_still_being_read_keeps_the_view_busy_until_it_is_ready() {
     assert!(matches!(engine.view().screen, Screen::Crop(_)));
 }
 
+// ---- the review-first contract (the engine answers it before it does it) ----
+
+#[test]
+fn a_tray_page_names_its_photo_and_is_ready_and_no_work_is_reported_yet() {
+    let dir = TempDir::new("tray-contract");
+    let mut engine = engine_with_photo(&dir);
+    let (photo, _) = current(&engine);
+    let page = to_screen_three(&mut engine);
+    engine.dispatch(Command::PageAdd { page }).unwrap();
+    let view = engine.view();
+    assert_eq!(view.tray.len(), 1);
+    assert_eq!(view.tray[0].page, page);
+    assert_eq!(view.tray[0].photo, photo);
+    assert_eq!(view.tray[0].state, scancraft_core::engine_api::PageState::Ready);
+    assert!(view.importing.is_none() && view.reading_text.is_none() && view.exporting.is_none() && view.last_export.is_none());
+}
+
+#[test]
+fn the_new_commands_say_they_are_not_available_yet_and_change_nothing() {
+    let dir = TempDir::new("not-yet");
+    let mut engine = engine_with_photo(&dir);
+    let page = to_screen_three(&mut engine);
+    engine.dispatch(Command::PageAdd { page }).unwrap();
+    let before = engine.view();
+    for command in [Command::PageSetLookAll { look: Look::Grayscale, strength: 70 }, Command::PageMarkReviewed { page }, Command::ExportCancel] {
+        let error = engine.dispatch(command.clone()).unwrap_err();
+        assert!(error.contains("isn't available yet"), "{command:?} answered {error:?}");
+    }
+    assert_eq!(engine.view(), before, "a command that failed changed the view");
+    // The picture of the unfiltered page is not made yet either: it is never ready, and asking
+    // for it starts nothing that could fail.
+    assert!(engine.image(ImageKey::OriginalPreview(page)).is_none());
+    settle(&mut engine);
+    assert!(engine.image(ImageKey::OriginalPreview(page)).is_none());
+}
+
 // ---- Screen 2 ----
 
 #[test]

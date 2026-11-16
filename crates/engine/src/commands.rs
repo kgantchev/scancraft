@@ -104,6 +104,11 @@ impl Engine {
             Command::ExportPdf { path, options } => self.export_pdf_command(path, options),
             Command::SessionNew => self.session_new(),
             Command::SessionRestore => self.session_restore(),
+            // The contract has these (the review-first flow); the engine does not do them yet. They
+            // answer with an error the interface can show, and change nothing.
+            Command::PageSetLookAll { .. } | Command::PageMarkReviewed { .. } | Command::ExportCancel => {
+                Err(EngineError::msg("That isn't available yet."))
+            }
             // Handled before the snapshot is taken.
             Command::EditUndo | Command::EditRedo => Ok(()),
         }
@@ -1018,7 +1023,7 @@ impl Engine {
 fn image_of(key: &scancraft_core::engine_api::ImageKey, page: PageId) -> bool {
     use scancraft_core::engine_api::ImageKey;
     match key {
-        ImageKey::LookPreview(p) | ImageKey::FilterThumb(p, _) | ImageKey::TrayThumb(p) => *p == page,
+        ImageKey::LookPreview(p) | ImageKey::FilterThumb(p, _) | ImageKey::TrayThumb(p) | ImageKey::OriginalPreview(p) => *p == page,
         ImageKey::DisplayCopy(_) | ImageKey::PhotoThumb(_) => false,
     }
 }
