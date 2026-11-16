@@ -10,7 +10,7 @@ use crate::pipeline::{
 };
 use crate::{Detected, Engine, PhotoStatus, Target};
 use scancraft_core::engine_api::{ImageKey, LoupeCrop, Screen};
-use scancraft_core::geom::Point;
+use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{CornerOrigin, FlattenMode, Look, Page, PageId, PhotoId, PhotoItem, RecognizedText, TurnOrigin};
 use std::path::PathBuf;
@@ -26,6 +26,8 @@ pub(crate) enum JobOutput {
     Text { page: PageId, for_key: String, text: Option<RecognizedText> },
     Upright { page: PageId, for_key: String, turns: Option<u8>, notes: Vec<String> },
     Flatten { page: PageId, for_key: String, result: Box<FlattenResult> },
+    /// A30: the spine found for a spread, `None` when the photo is one page.
+    Spine { photo: PhotoId, whole: Quad, spine: Option<scancraft_detect::spread::Spine> },
     Exported { report: ExportReport, path: PathBuf },
     Decoded,
 }
@@ -256,6 +258,39 @@ impl Engine {
         );
     }
 
+    /// A30 for a split photo, in the background: finds the spine of the spread the outline
+    /// marks. The halves stand at the centre line until the answer comes back, and move to the
+    /// spine then, unless the user moved it first.
+    pub(crate) fn submit_spine(&mut self, photo: PhotoId, whole: Quad) {
+        let Some(item) = self.session.photo(photo).cloned() else { return };
+        let token = self.fresh_token(Target::Spine(photo));
+        let ctx = self.ctx();
+        let meta = JobMeta { photo: Some(photo), tag: tag_of(&["spine", &format!("{photo:?}|{whole:?}")]), ..JobMeta::default() };
+        self.submit_job(
+            JobPriority::Preview,
+            token,
+            meta,
+            Box::new(move |token| {
+                let loaded = load_photo(&ctx, &item.source, &item.origin, token)?;
+                let size = (loaded.image.width(), loaded.image.height());
+                let focal = loaded.focal.unwrap_or(item.focal);
+                let proportions = scancraft_geom::proportions::true_proportions(&scancraft_geom::proportions::ProportionsInput {
+                    corners: whole,
+                    photo: size,
+                    focal,
+                    snap: false,
+                    default_paper: ctx.settings.default_paper,
+                })
+                .map_err(EngineError::from)?;
+                token.check()?;
+                let pyramid = scancraft_detect::refine::build_pyramid(&scancraft_detect::detect::photo_luma(&loaded.image)?)?;
+                token.check()?;
+                let spine = scancraft_detect::spread::find_spine(&pyramid, &whole, proportions.proportions.ratio)?;
+                Ok(JobOutput::Spine { photo, whole, spine })
+            }),
+        );
+    }
+
     /// A29 for a page, in the background: the evidence, the sheet fit and the check on the
     /// straightened page. The page is shown by its corners until the answer comes back.
     pub(crate) fn submit_flatten(&mut self, page: &Page) {
@@ -422,6 +457,7 @@ impl Engine {
                 }
                 true
             }
+            JobOutput::Spine { photo, whole, spine } => self.apply_spine(photo, whole, spine),
             JobOutput::Flatten { page, for_key, result } => {
                 let FlattenResult { fit, note } = *result;
                 if let Some(note) = note {

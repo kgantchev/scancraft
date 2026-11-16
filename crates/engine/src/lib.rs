@@ -84,6 +84,8 @@ pub(crate) enum Target {
     Preview(PageId),
     /// A29's decision for a page: it outlives the page's look changes, and a newer request replaces it.
     Flatten(PageId),
+    /// A30's search for a photo's spine.
+    Spine(PhotoId),
     /// The export.
     Export,
 }

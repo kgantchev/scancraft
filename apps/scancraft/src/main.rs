@@ -204,6 +204,25 @@ fn default_page_order() -> PageOrder {
     scancraft_ui_egui::state::default_page_order()
 }
 
+/// Starts the engine in a new session folder under `root`, so the last session is still there to
+/// offer ("Continue your last scan?", §4.2). Sessions with nothing in them are swept first: they
+/// are never worth offering, and the cleanup keeps every session that was not exported.
+fn start_engine(root: &std::path::Path, services: Services) -> Engine {
+    for info in scancraft_engine::session::list_sessions(root) {
+        if !info.exported && info.pages == 0 && info.dir.parent() == Some(root) {
+            let _ = std::fs::remove_dir_all(&info.dir);
+        }
+    }
+    let stamp = chrono::Local::now().format("Scan %Y-%m-%d at %H.%M.%S").to_string();
+    let mut dir = root.join(&stamp);
+    let mut n = 2;
+    while dir.exists() {
+        dir = root.join(format!("{stamp} {n}"));
+        n += 1;
+    }
+    Engine::new(dir, services)
+}
+
 fn services() -> Services {
     #[cfg(target_os = "macos")]
     {
@@ -232,7 +251,8 @@ fn main() -> ExitCode {
         Err(e) => eprintln!("ScanCraft couldn't read its icon: {e}"),
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let engine = Engine::new(std::env::temp_dir().join("scancraft-session"), services());
+    let root = scancraft_engine::settings::path_from_setting(&scancraft_ui_egui::state::default_session_storage());
+    let engine = start_engine(&root, services());
     let result = eframe::run_native(
         "ScanCraft",
         options,
@@ -259,6 +279,21 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_launch_starts_a_new_session_folder_under_the_root_and_sweeps_empty_ones() {
+        let root = std::env::temp_dir().join(format!("scancraft-app-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let first = start_engine(&root, Services::default());
+        let first_dir = first.session_dir().clone();
+        assert_eq!(first_dir.parent(), Some(root.as_path()), "the session is in the sessions folder, not the temporary one");
+        drop(first);
+        let second = start_engine(&root, Services::default());
+        assert_ne!(second.session_dir(), &first_dir);
+        assert!(!first_dir.exists(), "a session with nothing in it is swept");
+        drop(second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_app_icon_decodes_and_keeps_its_transparent_corners() {

@@ -393,8 +393,9 @@ impl Engine {
         self.session.file().pages.iter().any(|p| p.photo == photo)
     }
 
-    /// Cuts the photo's one pending page into a left and a right page down the middle. A30 isn't
-    /// finished, so the spine is the straight line between the middle of the top and bottom sides.
+    /// Cuts the photo's one pending page into a left and a right page down the middle. The cut is
+    /// at first the straight line between the middle of the top and bottom sides; A30 moves it to
+    /// the spine in the background.
     pub(crate) fn split_pending(&mut self, photo: PhotoId) -> Result<(), EngineError> {
         let ids = self.pending_ids(photo);
         let [id] = ids[..] else {
@@ -434,7 +435,49 @@ impl Engine {
         pending.insert(index, right);
         pending.insert(index, left);
         self.loupe = None;
+        // The halves stand at the centre line until A30 finds the spine.
+        self.submit_spine(photo, q);
         Ok(())
+    }
+
+    /// Moves the halves of a split photo onto the spine A30 found. A photo the user has already
+    /// changed (joined, its spine dragged, its outline edited) is left alone, and a photo A30
+    /// says is one page stays cut at the centre, with a note.
+    pub(crate) fn apply_spine(&mut self, photo: PhotoId, whole: Quad, spine: Option<scancraft_detect::spread::Spine>) -> bool {
+        let halves: Vec<Page> =
+            self.pending_ids(photo).iter().filter_map(|id| self.session.page(*id)).filter(|p| p.spread.is_some()).cloned().collect();
+        let untouched = halves.len() == 2 && halves.iter().all(|p| p.spread.as_ref().is_some_and(|s| s.confidence == 0.0 && s.spread_corners == whole));
+        if !untouched {
+            return false;
+        }
+        let Some(spine) = spine else {
+            self.notify("No spine found: the photo is cut down the middle. Drag the spine's ends, or choose Join Pages.", false);
+            return true;
+        };
+        let find = |half: Half| halves.iter().find(|p| p.spread.as_ref().is_some_and(|s| s.half == half));
+        let (Some(left), Some(right)) = (find(Half::Left), find(Half::Right)) else { return false };
+        let straight = SideShape::Straight;
+        let outer = |s: &SideShape| if matches!(s, SideShape::Spine) { SideShape::Straight } else { s.clone() };
+        let sides = [straight.clone(), outer(&right.sides[1]), straight, outer(&left.sides[3])];
+        let Ok(cut) = scancraft_detect::spread::split(&whole, &sides, &spine) else { return false };
+        let [top, bottom] = spine.ends;
+        let confidence = spine.confidence.max(f32::MIN_POSITIVE);
+        for part in cut {
+            let Some(id) = find(part.half).map(|p| p.id) else { continue };
+            let _ = self.edit_outline(
+                id,
+                |p| {
+                    p.corners = part.corners;
+                    p.sides = part.sides.clone();
+                    if let Some(s) = p.spread.as_mut() {
+                        s.spine = [top, bottom];
+                        s.confidence = confidence;
+                    }
+                },
+                false,
+            );
+        }
+        true
     }
 
     /// The reverse: the photo's two pending halves become one page again.
@@ -459,6 +502,9 @@ impl Engine {
         for id in ids {
             self.cancel_page(id);
         }
+        if let Some(t) = self.tokens.remove(&Target::Spine(photo)) {
+            t.cancel();
+        }
         let pending = self.session.pending_mut();
         let at = pending.iter().position(|p| p.id == left.id).unwrap_or(0);
         pending.retain(|p| !(p.photo == photo && p.spread.is_some()));
@@ -478,9 +524,6 @@ impl Engine {
                 self.join_pending(photo)?
             }
         }
-        if on {
-            self.notify("Finding a book's spine isn't ready yet (A30): each photo is cut down the middle.", false);
-        }
         Ok(())
     }
 
@@ -492,9 +535,7 @@ impl Engine {
             if self.pending_ids(photo).is_empty() {
                 return Err(EngineError::msg("This photo has no page to split."));
             }
-            self.split_pending(photo)?;
-            self.notify("Finding a book's spine isn't ready yet (A30): the photo is cut down the middle.", false);
-            Ok(())
+            self.split_pending(photo)
         } else {
             self.join_pending(photo)
         }
@@ -506,6 +547,10 @@ impl Engine {
         }
         if !top.is_finite() || !bottom.is_finite() {
             return Err(EngineError::msg("That spine position isn't a number."));
+        }
+        // The user's spine wins over A30's, which may still be on its way.
+        if let Some(t) = self.tokens.remove(&Target::Spine(photo)) {
+            t.cancel();
         }
         let size = self.session.photo(photo).map_or((0, 0), |p| p.size);
         let (top, bottom) = (clamp_corner(top, size), clamp_corner(bottom, size));
