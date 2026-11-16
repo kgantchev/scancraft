@@ -1006,3 +1006,57 @@ fn a_book_spread_is_labelled_with_the_whole_spread_and_its_spine() {
     assert_eq!(loaded.samples.len(), 1, "skipped: {:?}", loaded.skipped);
     assert!(loaded.samples[0].spine.is_some());
 }
+
+#[test]
+fn book_spreads_put_the_cut_on_the_spine_a30_finds() {
+    // The drawn spread: its true spine is in the truth file. The detector is given the true
+    // outline, so the only thing under test is where the pages are cut.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let bytes = std::fs::read(root.join("spread.png")).unwrap();
+    let truth: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("spread.json")).unwrap()).unwrap();
+    let point = |v: &serde_json::Value| Point::new(v["x"].as_f64().unwrap(), v["y"].as_f64().unwrap());
+    let quad = scancraft_core::geom::Quad([
+        point(&truth["corners"][0]),
+        point(&truth["corners"][1]),
+        point(&truth["corners"][2]),
+        point(&truth["corners"][3]),
+    ]);
+    let spine = [point(&truth["spine"][0]), point(&truth["spine"][1])];
+    let dir = TempDir::new("spine");
+    let set = TempDir::new("spine-set");
+    let mut engine = open(&dir, services(quad));
+    let path = write(&set, "spread.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    engine.dispatch(Command::CropBook { on: true }).unwrap();
+    settle(&mut engine);
+    let crop = engine.view().crop.unwrap();
+    assert_eq!(crop.outlines.len(), 2);
+    let found = crop.spine.unwrap();
+    let width = quad.tl().distance(quad.tr());
+    for end in 0..2 {
+        // Along the spine an end may slide to where the spread's own top or bottom side is; across
+        // it, the spine has to be within 1% of the spread's width (§10.4).
+        let miss = (found[end].x - spine[end].x).abs();
+        assert!(miss < 0.01 * width, "end {end} of the spine is {miss:.1} px off the truth ({:?} against {:?})", found[end], spine[end]);
+    }
+}
+
+#[test]
+fn a_spine_the_user_moved_is_not_moved_back_by_a30() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let bytes = std::fs::read(root.join("spread.png")).unwrap();
+    let (_, quad) = flat_fixture();
+    let dir = TempDir::new("spine-user");
+    let set = TempDir::new("spine-user-set");
+    let mut engine = open(&dir, services(quad));
+    let path = write(&set, "spread.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let (photo, _) = current(&engine);
+    engine.dispatch(Command::CropBook { on: true }).unwrap();
+    engine.dispatch(Command::CropSetSpine { photo, top: Point::new(430.0, 70.0), bottom: Point::new(450.0, 590.0) }).unwrap();
+    settle(&mut engine);
+    let found = engine.view().crop.unwrap().spine.unwrap();
+    assert_eq!((found[0], found[1]), (Point::new(430.0, 70.0), Point::new(450.0, 590.0)));
+}

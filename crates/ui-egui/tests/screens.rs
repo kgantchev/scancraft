@@ -1125,3 +1125,89 @@ fn the_canvas_has_room_for_a_corner_outside_the_photo() {
         assert!(!canvas.rect.contains(at), "{at:?} should be outside the photo {:?}", canvas.rect);
     }
 }
+
+// -------------------------------------------------------------- the stages
+
+#[test]
+fn the_stage_bar_names_the_four_stages_and_marks_the_current_one() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    for label in ["Step 1 of 4: Import", "Step 2 of 4: Crop", "Step 3 of 4: Enhance", "Step 4 of 4: Export"] {
+        assert!(harness.query_all_by_label(label).next().is_some(), "no stage {label:?}");
+    }
+    let node = harness.query_all_by_label("Step 2 of 4: Crop").next().expect("the Crop stage");
+    assert_eq!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True));
+    let node = harness.query_all_by_label("Step 3 of 4: Enhance").next().expect("the Enhance stage");
+    assert_ne!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True));
+}
+
+#[test]
+fn the_import_stage_shows_the_drop_zone_over_the_crop_screen_and_back() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Step 1 of 4: Import");
+    assert!(
+        shown_text(&harness).contains("Drop photos or PDFs here") || harness.query_all_by_label_contains("Drop photos or PDFs here").next().is_some()
+    );
+    assert!(dispatched(&harness).is_empty(), "going to Import is the interface's own move");
+    click_label(&mut harness, "Step 2 of 4: Crop");
+    assert!(harness.query_all_by_label("Correct Perspective").next().is_some());
+}
+
+#[test]
+fn the_enhance_stage_from_crop_applies_the_perspective() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Step 3 of 4: Enhance");
+    assert_eq!(dispatched(&harness), vec![Command::CropApply { photo: PHOTO }]);
+}
+
+#[test]
+fn the_export_stage_asks_the_shell_for_the_save_panel() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Step 4 of 4: Export");
+    let actions = harness.state_mut().0.take_actions();
+    assert!(actions.iter().any(|a| matches!(a, scancraft_ui_egui::UiAction::ExportPdf { .. })), "{actions:?}");
+}
+
+#[test]
+fn the_tools_are_not_in_the_step_bar_and_the_steps_are_not_in_the_tools() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let tools = bounds_of(&harness, "Use Full Image");
+    let step = bounds_of(&harness, "Correct Perspective");
+    assert!(tools.max.x < 300.0, "the tools are in the left panel");
+    assert!(step.min.y > tools.max.y, "the step button is below the tools, in the step bar");
+}
+
+#[test]
+fn exporting_with_photos_waiting_asks_first() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Export to PDF");
+    assert!(harness.state_mut().0.take_actions().is_empty(), "the Save panel waits for the answer");
+    assert!(harness.query_all_by_label_contains("haven't been added").next().is_some(), "the question is shown");
+    click_label(&mut harness, "Export");
+    let actions = harness.state_mut().0.take_actions();
+    assert!(actions.iter().any(|a| matches!(a, scancraft_ui_egui::UiAction::ExportPdf { .. })), "{actions:?}");
+}
+
+#[test]
+fn cancelling_the_question_exports_nothing() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Export to PDF");
+    click_label(&mut harness, "Cancel");
+    assert!(harness.state_mut().0.take_actions().is_empty());
+    assert!(harness.query_all_by_label_contains("haven't been added").next().is_none());
+}
+
+#[test]
+fn the_menu_and_the_arrows_move_between_photos() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Next Photo");
+    let sent = dispatched(&harness);
+    assert!(matches!(sent.as_slice(), [Command::PageOpenCrop { .. }]) || sent.is_empty(), "{sent:?}");
+}

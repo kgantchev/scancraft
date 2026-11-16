@@ -118,3 +118,70 @@ pub fn arrow_button(ui: &mut Ui, label: &str, pointing: Arrow) -> egui::Response
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response
 }
+
+/// The fill of a tool button: neutral, so the copper buttons stay the ones that move on.
+pub fn tool_fill(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode { Color32::from_rgb(0x3A, 0x3A, 0x3D) } else { Color32::from_rgb(0xD9, 0xD9, 0xDC) }
+}
+
+/// A button that changes the picture or the page: neutral and full width, never copper.
+pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
+    let fill = tool_fill(ui);
+    let ink = ui.visuals().text_color();
+    let button =
+        egui::Button::new(egui::RichText::new(label).color(ink)).fill(fill).stroke(Stroke::NONE).min_size(Vec2::new(ui.available_width(), 28.0));
+    ui.add_enabled(enabled, button)
+}
+
+/// The colour of text on the window's own background, in either appearance.
+pub fn ink(ui: &Ui) -> Color32 {
+    ui.visuals().text_color()
+}
+
+/// The heading of a group of tools.
+pub fn section_heading(ui: &mut Ui, text: &str) {
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(text.to_uppercase()).small().strong().color(ui.visuals().weak_text_color()));
+    ui.add_space(2.0);
+}
+
+/// Which way a navigation button points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// To the previous step.
+    Back,
+    /// To the next step.
+    Forward,
+}
+
+/// A button that moves to another step: large, with an arrow, copper when it goes forward and
+/// outlined when it goes back. Tools never look like this.
+pub fn nav_button(ui: &mut Ui, label: &str, direction: Direction, enabled: bool) -> egui::Response {
+    let font = egui::FontId::proportional(15.0);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+    let size = Vec2::new(galley.size().x + 28.0 + 26.0, 38.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = enabled && response.hovered();
+    let forward = direction == Direction::Forward;
+    let (fill, text, stroke) = if forward {
+        (if hovered { LIGHT_COPPER } else { COPPER }, Color32::WHITE, Stroke::NONE)
+    } else {
+        (Color32::TRANSPARENT, ui.visuals().text_color(), Stroke::new(1.5, if hovered { LIGHT_COPPER } else { ui.visuals().weak_text_color() }))
+    };
+    let alpha = if enabled { 1.0 } else { 0.4 };
+    let painter = ui.painter_at(rect.expand(2.0));
+    painter.rect(rect, 8.0, fill.gamma_multiply(alpha), stroke, egui::StrokeKind::Inside);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(15.0), text.gamma_multiply(alpha));
+    let (text_x, arrow_x) = if forward { (rect.min.x + 14.0, rect.max.x - 15.0) } else { (rect.min.x + 30.0, rect.min.x + 15.0) };
+    painter.galley(egui::Pos2::new(text_x, rect.center().y - galley.size().y / 2.0), galley, text);
+    let (w, h) = (4.0f32, 6.0f32);
+    let c = egui::Pos2::new(arrow_x, rect.center().y);
+    let points = if forward {
+        vec![egui::Pos2::new(c.x - w, c.y - h), egui::Pos2::new(c.x - w, c.y + h), egui::Pos2::new(c.x + w, c.y)]
+    } else {
+        vec![egui::Pos2::new(c.x + w, c.y - h), egui::Pos2::new(c.x + w, c.y + h), egui::Pos2::new(c.x - w, c.y)]
+    };
+    painter.add(egui::Shape::convex_polygon(points, text.gamma_multiply(alpha), Stroke::NONE));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
+}

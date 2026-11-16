@@ -16,11 +16,13 @@ pub mod import;
 pub mod loupe;
 pub mod menu;
 pub mod state;
+pub mod stepper;
 pub mod text;
 pub mod theme;
+pub mod tools;
 pub mod tray;
 
-use scancraft_core::engine_api::{EngineApi, Notice, Screen, ViewState};
+use scancraft_core::engine_api::{EngineApi, Notice, ViewState};
 
 pub use fake_engine::FakeEngine;
 pub use menu::{build_menu_bar, menu_state};
@@ -41,20 +43,49 @@ impl ScanCraftUi {
     pub fn ui(&mut self, ui: &mut egui::Ui, engine: &mut dyn EngineApi) {
         self.apply_theme(ui.ctx());
         let view = engine.view();
+        stepper::track_work(&mut self.state, &view);
+        let stage = stepper::current_stage(&self.state, &view);
         let show_tray = !view.tray.is_empty() && !self.state.tray_hidden;
+        // The stage bar, along the top: where the user is in the scan, and a way to any stage.
+        egui::Panel::top("scancraft.stages")
+            .exact_size(stepper::STAGE_BAR_HEIGHT)
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                stepper::stage_bar(ui, &mut self.state, &view, engine);
+            });
         // The tray's bar, along the bottom of the window (§4.5).
         if show_tray {
             egui::Panel::bottom("scancraft.tray").exact_size(tray::BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
                 tray::page_tray(ui, &mut self.state, &view, engine);
             });
         }
+        // The step bar, above the tray: the buttons that move on or back.
+        egui::Panel::bottom("scancraft.steps").exact_size(stepper::STEP_BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
+            stepper::step_bar(ui, &mut self.state, &view, engine);
+        });
+        // The tools, on the left: everything that changes the picture.
+        if matches!(stage, stepper::Stage::Crop | stepper::Stage::Enhance) {
+            let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(12));
+            egui::Panel::left("scancraft.tools").exact_size(tools::PANEL_WIDTH).resizable(false).show_separator_line(true).frame(frame).show(
+                ui,
+                |ui| {
+                    if stage == stepper::Stage::Crop {
+                        tools::crop_tools(ui, &mut self.state, &view, engine);
+                    } else {
+                        tools::enhance_tools(ui, &mut self.state, &view, engine);
+                    }
+                },
+            );
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             self.notice_strip(ui, &view);
-            match view.screen {
-                Screen::Import => import::import_screen(ui, &mut self.state, &view, engine),
-                Screen::Crop(_) => crop::crop_screen(ui, &mut self.state, &view, engine),
-                Screen::Enhance(_) => enhance::enhance_screen(ui, &mut self.state, &view, engine),
-                Screen::Export => self.export_screen(ui),
+            match stage {
+                stepper::Stage::Import => import::import_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Crop => crop::crop_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Enhance => enhance::enhance_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Export => self.export_screen(ui),
             }
         });
         // The windows that float above the screens.
@@ -63,6 +94,9 @@ impl ScanCraftUi {
         }
         if self.state.about_open {
             self.about_window(ui.ctx());
+        }
+        if let Some((waiting, pages)) = self.state.confirm_export {
+            self.confirm_export_window(ui.ctx(), waiting, pages);
         }
         if self.state.label_open {
             export::label_window(ui.ctx(), &mut self.state, &view, engine);
@@ -92,7 +126,7 @@ impl ScanCraftUi {
 
     /// Whether a window of the interface is open, so the menu's items are greyed out.
     pub fn is_modal(&self) -> bool {
-        self.state.settings_open || self.state.export_popover || self.state.about_open || self.state.label_open
+        self.state.settings_open || self.state.export_popover || self.state.about_open || self.state.label_open || self.state.confirm_export.is_some()
     }
 
     /// Sets the folder of the reference set the labels are written to, after the folder panel
@@ -172,6 +206,33 @@ impl ScanCraftUi {
         ui.centered_and_justified(|ui| {
             ui.label(text);
         });
+    }
+
+    /// "3 photos haven't been added. Export the 5 added pages?" (§4.8).
+    fn confirm_export_window(&mut self, ctx: &egui::Context, waiting: usize, pages: usize) {
+        let photos = self.state.text.trn(waiting as u64, "{n} photo hasn't been added.", "{n} photos haven't been added.");
+        let question = self.state.text.trn(pages as u64, "Export the {n} added page?", "Export the {n} added pages?");
+        egui::Window::new("Some photos haven't been added").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
+            ctx,
+            |ui| {
+                ui.label(format!("{photos} {question}"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(self.state.text.t("Export")).clicked() {
+                        self.state.confirm_export = None;
+                        self.state.start_export();
+                    }
+                    if ui.button(self.state.text.t("Cancel")).clicked() {
+                        self.state.confirm_export = None;
+                    }
+                });
+            },
+        );
+    }
+
+    /// Shows a message from the app shell, such as a refused import (§4.8).
+    pub fn notice(&mut self, text: impl Into<String>, error: bool) {
+        self.state.notice(text, error);
     }
 
     /// The About panel.

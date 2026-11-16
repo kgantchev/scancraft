@@ -84,6 +84,8 @@ pub(crate) enum Target {
     Preview(PageId),
     /// A29's decision for a page: it outlives the page's look changes, and a newer request replaces it.
     Flatten(PageId),
+    /// A30's search for a photo's spine.
+    Spine(PhotoId),
     /// The export.
     Export,
 }
@@ -253,6 +255,11 @@ impl Engine {
             }
             self.names.insert(item.id, item.name.clone());
         }
+    }
+
+    /// Whether a PDF is being written now, so the app asks before it quits (§4.8).
+    pub fn is_exporting(&self) -> bool {
+        self.exporting.is_some()
     }
 
     pub fn session_dir(&self) -> &PathBuf {

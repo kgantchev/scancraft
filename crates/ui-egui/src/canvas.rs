@@ -515,9 +515,9 @@ fn draw_corner(
     let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
     let response = ui.interact(hit, id, Sense::click_and_drag());
     let mut dragging = false;
+    // A drag that has begun on the node stays with it, however far the pointer jumps in a frame.
     if response.dragged()
         && let Some(pointer) = response.interact_pointer_pos()
-        && (pointer - position).length() <= theme::CORNER_HIT_RADIUS
     {
         let photo_point = canvas.canvas_to_photo(pointer);
         dispatch(state, engine, Command::CropSetCorner { page, corner, x: photo_point.x, y: photo_point.y });

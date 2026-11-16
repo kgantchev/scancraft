@@ -30,6 +30,10 @@ struct App {
     engine: Engine,
     menu: Option<craft_menu::NativeMenu>,
     panels: Dialogs<PanelAction>,
+    /// The "Cancel Export or Keep Exporting" question is showing (§4.8).
+    quit_prompt: bool,
+    /// The user chose to quit although an export is running.
+    quit_confirmed: bool,
 }
 
 impl App {
@@ -68,6 +72,10 @@ impl App {
     /// Runs a menu item: the app's own Quit, and everything else through the interface.
     fn run_command(&mut self, command: &craft_menu::CommandRef, ctx: &egui::Context) {
         if command.id == craft_quit::QUIT_MENU_ID {
+            if self.engine.is_exporting() && !self.quit_confirmed {
+                self.quit_prompt = true;
+                return;
+            }
             craft_quit::on_menu_event(ctx, &command.id);
             return;
         }
@@ -115,11 +123,15 @@ impl App {
             match (action, answer) {
                 (PanelAction::Import, Answer::Paths(paths)) => {
                     let paths: Vec<String> = paths.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-                    let _ = self.engine.dispatch(Command::ImportAdd { paths });
+                    if let Err(e) = self.engine.dispatch(Command::ImportAdd { paths }) {
+                        self.ui.notice(e, true);
+                    }
                 }
                 (PanelAction::Export { options }, Answer::Paths(paths)) => {
-                    if let Some(path) = paths.first() {
-                        let _ = self.engine.dispatch(Command::ExportPdf { path: path.to_string_lossy().into_owned(), options });
+                    if let Some(path) = paths.first()
+                        && let Err(e) = self.engine.dispatch(Command::ExportPdf { path: path.to_string_lossy().into_owned(), options })
+                    {
+                        self.ui.notice(e, true);
                     }
                 }
                 (PanelAction::LabelFolder, Answer::Paths(paths)) => {
@@ -132,6 +144,36 @@ impl App {
         }
         self.panels.show_pending(Some(frame));
         let _ = ui;
+    }
+}
+
+impl App {
+    /// "A PDF is being written. Cancel the export, or keep exporting?" (§4.8).
+    fn quit_question(&mut self, ctx: &egui::Context) {
+        if !self.quit_prompt {
+            return;
+        }
+        if !self.engine.is_exporting() {
+            self.quit_prompt = false;
+            return;
+        }
+        egui::Window::new("Quit during an export").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
+            ctx,
+            |ui| {
+                ui.label("A PDF is still being written.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Keep Exporting").clicked() {
+                        self.quit_prompt = false;
+                    }
+                    if ui.button("Cancel Export").clicked() {
+                        self.quit_prompt = false;
+                        self.quit_confirmed = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            },
+        );
     }
 }
 
@@ -167,6 +209,11 @@ impl eframe::App for App {
         if let Some(menu) = self.menu.as_mut() {
             menu.sync_with(state, || craft_menu::layout(&bar, craft_menu::Target::current(), &options));
         }
+        // Quitting during an export asks one question; the session is already saved (§4.8).
+        if ctx.input(|i| i.viewport().close_requested()) && self.engine.is_exporting() && !self.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit_prompt = true;
+        }
         craft_quit::on_close_request(ctx);
     }
 
@@ -174,6 +221,7 @@ impl eframe::App for App {
         self.ui.set_settings(ui_settings(&self.engine));
         self.ui.ui(ui, &mut self.engine);
         self.panels(ui, frame);
+        self.quit_question(ui.ctx());
     }
 }
 
@@ -204,6 +252,25 @@ fn default_page_order() -> PageOrder {
     scancraft_ui_egui::state::default_page_order()
 }
 
+/// Starts the engine in a new session folder under `root`, so the last session is still there to
+/// offer ("Continue your last scan?", §4.2). Sessions with nothing in them are swept first: they
+/// are never worth offering, and the cleanup keeps every session that was not exported.
+fn start_engine(root: &std::path::Path, services: Services) -> Engine {
+    for info in scancraft_engine::session::list_sessions(root) {
+        if !info.exported && info.pages == 0 && info.dir.parent() == Some(root) {
+            let _ = std::fs::remove_dir_all(&info.dir);
+        }
+    }
+    let stamp = chrono::Local::now().format("Scan %Y-%m-%d at %H.%M.%S").to_string();
+    let mut dir = root.join(&stamp);
+    let mut n = 2;
+    while dir.exists() {
+        dir = root.join(format!("{stamp} {n}"));
+        n += 1;
+    }
+    Engine::new(dir, services)
+}
+
 fn services() -> Services {
     #[cfg(target_os = "macos")]
     {
@@ -232,7 +299,8 @@ fn main() -> ExitCode {
         Err(e) => eprintln!("ScanCraft couldn't read its icon: {e}"),
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let engine = Engine::new(std::env::temp_dir().join("scancraft-session"), services());
+    let root = scancraft_engine::settings::path_from_setting(&scancraft_ui_egui::state::default_session_storage());
+    let engine = start_engine(&root, services());
     let result = eframe::run_native(
         "ScanCraft",
         options,
@@ -244,7 +312,7 @@ fn main() -> ExitCode {
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
             };
-            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake) }))
+            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake), quit_prompt: false, quit_confirmed: false }))
         }),
     );
     match result {
@@ -259,6 +327,23 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_launch_starts_a_new_session_folder_under_the_root_and_sweeps_empty_ones() {
+        let root = std::env::temp_dir().join(format!("scancraft-app-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let first = start_engine(&root, Services::default());
+        let first_dir = first.session_dir().clone();
+        assert_eq!(first_dir.parent(), Some(root.as_path()), "the session is in the sessions folder, not the temporary one");
+        drop(first);
+        let earlier = root.join("Scan earlier");
+        std::fs::rename(&first_dir, &earlier).unwrap();
+        let second = start_engine(&root, Services::default());
+        assert_eq!(second.session_dir().parent(), Some(root.as_path()));
+        assert!(!earlier.exists(), "a session with nothing in it is swept");
+        drop(second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_app_icon_decodes_and_keeps_its_transparent_corners() {

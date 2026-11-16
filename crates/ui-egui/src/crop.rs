@@ -24,7 +24,6 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     let Some(crop) = view.crop.as_ref() else {
         return;
     };
-    crop_toolbar(ui, state, view, engine);
     photo_strip(ui, state, crop, engine);
     let area = ui.available_rect_before_wrap();
     let (rect, _) = ui.allocate_exact_size(area.size(), Sense::hover());
@@ -102,72 +101,6 @@ pub fn photo_strip(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &m
         });
     });
     ui.add_space(4.0);
-}
-
-/// The toolbar above the canvas (§4.3).
-pub fn crop_toolbar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    let Some(crop) = view.crop.as_ref() else {
-        return;
-    };
-    let Some(outline) = crop.outlines.first().cloned() else {
-        return;
-    };
-    let photo = crop.photo;
-    ui.horizontal_wrapped(|ui| {
-        // Auto-Detect.
-        let mut auto = crop.auto_detect;
-        let label = state.text.t("Auto-Detect");
-        let response = ui.checkbox(&mut auto, label).on_hover_text(auto_detect_tooltip(&outline.corners_from));
-        if response.clicked() && !crop.auto_detect {
-            canvas::dispatch(state, engine, Command::CropAuto { page: outline.page });
-        }
-        // Flatten: Auto, On and Off.
-        let flatten_label = state.text.t("Flatten");
-        ui.label(flatten_label).on_hover_text(flatten_tooltip(&outline));
-        let mut mode = outline.flatten;
-        for (option, name) in [(FlattenMode::Auto, "Auto"), (FlattenMode::On, "On"), (FlattenMode::Off, "Off")] {
-            let name = state.text.t(name);
-            if ui.radio_value(&mut mode, option, name).changed() && mode != outline.flatten {
-                canvas::dispatch(state, engine, Command::CropSetFlatten { page: outline.page, mode });
-            }
-        }
-        // Use Full Image.
-        let full = state.text.t("Use Full Image");
-        if ui.button(full).clicked() {
-            canvas::dispatch(state, engine, Command::CropFullImage { page: outline.page });
-        }
-        // Correct Perspective.
-        let apply = state.text.t("Correct Perspective");
-        let mut button = ui.add_enabled(outline.invalid.is_none(), egui::Button::new(apply));
-        if let Some(reason) = &outline.invalid {
-            button = button.on_hover_text(reason.clone());
-        }
-        if button.clicked() {
-            canvas::dispatch(state, engine, Command::CropApply { photo });
-        }
-        // Discard Photo.
-        let discard = state.text.t("Discard Photo");
-        if ui.button(discard).clicked() {
-            canvas::dispatch(state, engine, Command::ImportDiscard { item: photo });
-        }
-        // The batch's position.
-        let position = state.text.t(&format!("Photo {} of {}", crop.position.0, crop.position.1));
-        ui.label(position);
-        let previous = state.text.t("Previous Photo");
-        let next = state.text.t("Next Photo");
-        if theme::arrow_button(ui, &previous, theme::Arrow::Left).on_hover_text(previous.clone()).clicked() {
-            state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
-        }
-        if theme::arrow_button(ui, &next, theme::Arrow::Right).on_hover_text(next.clone()).clicked() {
-            state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
-        }
-        // Book Spreads.
-        let mut spreads = view.book_spreads;
-        let label = state.text.t("Book Spreads");
-        if ui.checkbox(&mut spreads, label).changed() {
-            canvas::dispatch(state, engine, Command::CropBook { on: spreads });
-        }
-    });
 }
 
 /// The Auto-Detect tooltip names the source of the corners (§4.3).
