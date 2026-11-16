@@ -1487,6 +1487,26 @@ fn arrow_keys_still_change_the_filter_after_a_click_on_a_filter() {
     );
 }
 
+#[test]
+fn each_screen_has_one_copper_button() {
+    // A screen carried up to six copper buttons, so none of them was the primary one. (A copper
+    // line under the current stage is not a button: only rectangles a finger can press count.)
+    for (name, view) in [("import", import_view()), ("crop", crop_view()), ("enhance", enhance_view())] {
+        for theme_choice in [egui::Theme::Light, egui::Theme::Dark] {
+            let mut harness = harness(view.clone(), theme_choice);
+            harness.run();
+            let found: Vec<_> = painted(&harness)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect) if rect.fill == scancraft_ui_egui::theme::COPPER && rect.rect.height() >= 20.0 => Some(rect.rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(found.len(), 1, "the {name} screen in the {theme_choice:?} appearance has {} copper buttons: {found:?}", found.len());
+        }
+    }
+}
+
 // ------------------------------------------------------------ honest controls
 
 /// Every shape a frame painted, with the groups taken apart.

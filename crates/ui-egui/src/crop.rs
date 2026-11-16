@@ -180,7 +180,10 @@ fn split_button(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &mut 
     let label = state.text.t("Two pages? Split");
     let response = ui.interact(rect, ui.make_persistent_id("scancraft.split"), Sense::click());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 6.0, theme::COPPER);
+    // A suggestion, not the way on: neutral, so Correct Perspective stays the one copper button.
+    let fill = if response.hovered() { Color32::from_rgb(0x48, 0x48, 0x4C) } else { Color32::from_rgb(0x3A, 0x3A, 0x3D) };
+    painter.rect_filled(rect, 6.0, fill);
+    painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_white_alpha(70)), egui::StrokeKind::Inside);
     painter.text(rect.center(), Align2::CENTER_CENTER, label.clone(), FontId::proportional(14.0), Color32::WHITE);
     if response.clicked() {
         canvas::dispatch(state, engine, Command::CropSplit { photo: crop.photo, on: true });
