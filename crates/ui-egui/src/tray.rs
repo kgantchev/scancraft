@@ -1,6 +1,6 @@
 //! The page tray (§4.5): the bar along the bottom of every screen, with the pages in export order.
 
-use egui::{Key, Pos2, Rect, Sense, TextureOptions, Ui, Vec2};
+use egui::{Color32, Key, Pos2, Rect, Sense, TextureOptions, Ui, Vec2};
 
 use scancraft_core::command::Command;
 use scancraft_core::engine_api::{EngineApi, ImageKey, TrayItem, ViewState};
@@ -47,26 +47,37 @@ pub fn page_tray(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
     delete_key(ui, state, view, engine);
 }
 
-/// Draws one thumbnail with its page number.
+/// Draws one thumbnail with its page number, at the page's own shape.
 fn draw_thumbnail(ui: &mut Ui, state: &mut UiState, item: &TrayItem, rect: Rect, engine: &mut dyn EngineApi) {
     let texture = state.texture(ui, engine, ImageKey::TrayThumb(item.page), TextureOptions::LINEAR);
-    let painter = ui.painter_at(rect);
-    if let Some(texture) = texture {
-        painter.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
-    } else {
-        painter.rect_filled(rect, 2.0, theme::CANVAS_BACKGROUND);
-    }
+    let painter = ui.painter_at(rect.expand(3.0));
+    let shown = match texture {
+        Some(texture) => crate::thumb::paint_fitted(&painter, rect, &texture),
+        None => {
+            painter.rect_filled(rect, 2.0, theme::CANVAS_BACKGROUND);
+            rect
+        }
+    };
     if state.tray_selected == Some(item.page) {
-        painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::SCAN_CYAN), egui::StrokeKind::Middle);
+        let accent = theme::accent(ui.visuals().dark_mode);
+        painter.rect_stroke(shown, 2.0, egui::Stroke::new(2.0, accent), egui::StrokeKind::Middle);
     }
-    let number = item.number.to_string();
-    painter.text(
-        Pos2::new(rect.center().x, rect.max.y + 10.0),
-        egui::Align2::CENTER_CENTER,
-        number,
-        egui::FontId::proportional(12.0),
-        ui.visuals().text_color(),
+    // The number goes inside the picture, on a dark chip: it was under the thumbnail, outside the
+    // area it is allowed to paint in, and so it was never seen.
+    let font = egui::FontId::proportional(11.0);
+    let galley = painter.layout_no_wrap(item.number.to_string(), font, Color32::WHITE);
+    let chip = Rect::from_min_size(
+        Pos2::new(shown.min.x + 3.0, shown.max.y - galley.size().y - 7.0),
+        Vec2::new(galley.size().x + 8.0, galley.size().y + 4.0),
     );
+    painter.rect_filled(chip, 4.0, Color32::from_black_alpha(170));
+    painter.galley(chip.min + Vec2::new(4.0, 2.0), galley, Color32::WHITE);
+    // The page's text is still being read: a small spinner says so.
+    if !item.text_ready {
+        let spot = Rect::from_center_size(Pos2::new(shown.max.x - 10.0, shown.min.y + 10.0), Vec2::splat(14.0));
+        painter.circle_filled(spot.center(), 9.0, Color32::from_black_alpha(170));
+        theme::spinner(ui, spot, Color32::WHITE);
+    }
 }
 
 /// A click reopens the page, a drag reorders it, and the context menu offers the four commands
@@ -94,17 +105,17 @@ fn handle_thumbnail(state: &mut UiState, item: &TrayItem, response: &egui::Respo
     }
     let page = item.page;
     response.context_menu(|ui| {
-        if ui.button("Edit Crop").clicked() {
+        if ui.button(state.text.t("Edit Crop")).clicked() {
             dispatch(state, engine, Command::PageOpenCrop { page });
         }
-        if ui.button("Rotate Left").clicked() {
+        if ui.button(state.text.t("Rotate Left")).clicked() {
             dispatch(state, engine, Command::PageRotate { page, quarter_turns: -1 });
         }
-        if ui.button("Rotate Right").clicked() {
+        if ui.button(state.text.t("Rotate Right")).clicked() {
             dispatch(state, engine, Command::PageRotate { page, quarter_turns: 1 });
         }
-        if ui.button("Delete").clicked() {
-            dispatch(state, engine, Command::PageDelete { page });
+        if ui.button(state.text.t("Delete")).clicked() {
+            delete_page(state, engine, page, item.number);
         }
     });
 }
@@ -137,11 +148,20 @@ fn delete_key(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut d
         return;
     }
     let Some(page) = state.tray_selected else { return };
-    if !view.tray.iter().any(|item| item.page == page) {
+    let Some(number) = view.tray.iter().find(|item| item.page == page).map(|item| item.number) else {
         return;
-    }
-    dispatch(state, engine, Command::PageDelete { page });
+    };
+    delete_page(state, engine, page, number);
     state.tray_selected = None;
+}
+
+/// Deletes a page and says so, with an Undo: nothing else on the screen says that a page has gone,
+/// and the Delete key works from every screen.
+fn delete_page(state: &mut UiState, engine: &mut dyn EngineApi, page: scancraft_core::recipe::PageId, number: u32) {
+    if dispatch(state, engine, Command::PageDelete { page }) {
+        let text = state.text.t("Page {n} deleted").replace("{n}", &number.to_string());
+        state.toast_with_undo(text);
+    }
 }
 
 /// The Export to PDF button and the chevron that opens the export options (§4.5).
@@ -155,9 +175,11 @@ fn export_button(ui: &mut Ui, state: &mut UiState, view: &ViewState) {
     if response.clicked() {
         state.export_popover = !state.export_popover;
     }
-    if state.export_popover {
-        egui::Popup::from_response(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            crate::export::export_options_popover(ui, state);
-        });
-    }
+    // The popup clears the flag itself when a click outside closes it. Left set, the flag made the
+    // menus take a window to be open for good.
+    let mut open = state.export_popover;
+    egui::Popup::from_response(&response).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        crate::export::export_options_popover(ui, state);
+    });
+    state.export_popover = open;
 }

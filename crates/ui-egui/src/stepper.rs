@@ -103,7 +103,9 @@ pub fn go_to(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, 
             state.show_import = false;
             match view.screen {
                 Screen::Crop(_) => {}
-                Screen::Enhance(page) => dispatch(state, engine, Command::PageOpenCrop { page }),
+                Screen::Enhance(page) => {
+                    dispatch(state, engine, Command::PageOpenCrop { page });
+                }
                 _ => {
                     if let Some(page) = first_page {
                         dispatch(state, engine, Command::PageOpenCrop { page });
@@ -115,7 +117,9 @@ pub fn go_to(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, 
             state.show_import = false;
             match view.screen {
                 Screen::Enhance(_) => {}
-                Screen::Crop(photo) => dispatch(state, engine, Command::CropApply { photo }),
+                Screen::Crop(photo) => {
+                    dispatch(state, engine, Command::CropApply { photo });
+                }
                 _ => {
                     if let Some(page) = first_page {
                         dispatch(state, engine, Command::PageEdit { page });
@@ -143,11 +147,12 @@ fn context(state: &UiState, view: &ViewState) -> String {
     let pages = view.tray.len();
     let added = match pages {
         0 => String::new(),
-        1 => "1 page added".to_owned(),
-        n => format!("{n} pages added"),
+        n => state.text.trn(n as u64, "{n} page added", "{n} pages added"),
     };
     let here = match (current_stage(state, view), view.crop.as_ref()) {
-        (Stage::Crop, Some(crop)) => format!("Photo {} of {}", crop.position.0, crop.position.1),
+        (Stage::Crop, Some(crop)) => {
+            state.text.t("Photo {a} of {b}").replace("{a}", &crop.position.0.to_string()).replace("{b}", &crop.position.1.to_string())
+        }
         _ => String::new(),
     };
     [here, added].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ")
@@ -160,6 +165,8 @@ pub fn stage_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
     let painter = ui.painter_at(rect);
     let weak = ui.visuals().weak_text_color();
     let strong = theme::ink(ui);
+    // Cyan cannot be seen on the light window: the marks of this bar are the accent colour.
+    let accent = theme::accent(ui.visuals().dark_mode);
     let slot = 168.0f32;
     let left = rect.min.x + 16.0;
     for (i, stage) in Stage::ALL.into_iter().enumerate() {
@@ -176,21 +183,17 @@ pub fn stage_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
         let hovered = enabled && response.hovered();
         if is_current {
             painter.rect_filled(cell, 8.0, theme::COPPER.gamma_multiply(0.22));
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(cell.min.x + 6.0, cell.max.y - 3.0), Vec2::new(cell.width() - 12.0, 3.0)),
-                1.5,
-                theme::SCAN_CYAN,
-            );
+            painter.rect_filled(Rect::from_min_size(Pos2::new(cell.min.x + 6.0, cell.max.y - 3.0), Vec2::new(cell.width() - 12.0, 3.0)), 1.5, accent);
         } else if hovered {
             painter.rect_filled(cell, 8.0, theme::COPPER.gamma_multiply(0.12));
         }
         // The number, or a tick when the stage is behind.
         let c = Pos2::new(cell.min.x + 20.0, cell.center().y);
         if done {
-            painter.circle_filled(c, 11.0, theme::SCAN_CYAN);
-            let dark = Stroke::new(2.0, theme::CANVAS_BACKGROUND);
-            painter.line_segment([c + Vec2::new(-4.5, 0.5), c + Vec2::new(-1.5, 3.5)], dark);
-            painter.line_segment([c + Vec2::new(-1.5, 3.5), c + Vec2::new(4.5, -3.5)], dark);
+            painter.circle_filled(c, 11.0, accent);
+            let tick = Stroke::new(2.0, Color32::WHITE);
+            painter.line_segment([c + Vec2::new(-4.5, 0.5), c + Vec2::new(-1.5, 3.5)], tick);
+            painter.line_segment([c + Vec2::new(-1.5, 3.5), c + Vec2::new(4.5, -3.5)], tick);
         } else if is_current {
             painter.circle_filled(c, 11.0, theme::COPPER);
             painter.text(c, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(13.0), Color32::WHITE);
@@ -224,8 +227,20 @@ pub fn stage_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
         }
     }
     let text = context(state, view);
+    let mut right = rect.max.x - 16.0;
     if !text.is_empty() {
-        painter.text(Pos2::new(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, text, FontId::proportional(13.0), weak);
+        let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), weak);
+        let width = galley.size().x;
+        painter.galley(Pos2::new(right - width, rect.center().y - galley.size().y / 2.0), galley, weak);
+        right -= width + 16.0;
+    }
+    // The engine is preparing pages in the background: say so, with something that moves.
+    if view.busy {
+        let working = state.text.t("Working…");
+        let galley = painter.layout_no_wrap(working, FontId::proportional(13.0), weak);
+        let width = galley.size().x;
+        painter.galley(Pos2::new(right - width, rect.center().y - galley.size().y / 2.0), galley, weak);
+        theme::spinner(ui, Rect::from_center_size(Pos2::new(right - width - 14.0, rect.center().y), Vec2::splat(14.0)), weak);
     }
 }
 
@@ -274,7 +289,8 @@ pub fn step_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut
                     {
                         dispatch(state, engine, Command::PageOpenCrop { page });
                     }
-                    let position = state.text.t(&format!("Photo {} of {}", crop.position.0, crop.position.1));
+                    let position =
+                        state.text.t("Photo {a} of {b}").replace("{a}", &crop.position.0.to_string()).replace("{b}", &crop.position.1.to_string());
                     ui.label(position);
                     let l = state.text.t("Next Photo");
                     if theme::arrow_button(ui, &l, theme::Arrow::Right).on_hover_text(l.clone()).clicked()

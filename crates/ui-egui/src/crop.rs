@@ -88,20 +88,21 @@ pub fn photo_strip(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &m
             for (index, tab) in crop.photos.iter().enumerate() {
                 let (rect, _) = ui.allocate_exact_size(STRIP_THUMB, Sense::hover());
                 let painter = ui.painter_at(rect.expand(3.0));
-                match state.texture(ui, engine, ImageKey::PhotoThumb(tab.photo), egui::TextureOptions::LINEAR) {
-                    Some(texture) => {
-                        painter.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                    }
+                // Each photo keeps its own shape inside its box.
+                let shown = match state.texture(ui, engine, ImageKey::PhotoThumb(tab.photo), egui::TextureOptions::LINEAR) {
+                    Some(texture) => crate::thumb::paint_fitted(&painter, rect, &texture),
                     None => {
                         painter.rect_filled(rect, 2.0, theme::CANVAS_BACKGROUND);
+                        rect
                     }
-                }
+                };
                 if tab.photo == crop.photo {
-                    painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::SCAN_CYAN), egui::StrokeKind::Middle);
+                    let accent = theme::accent(ui.visuals().dark_mode);
+                    painter.rect_stroke(shown, 2.0, egui::Stroke::new(2.0, accent), egui::StrokeKind::Middle);
                 }
                 if tab.added {
                     // A tick, drawn: the interface's font has no glyph for one.
-                    let c = rect.right_top() + Vec2::new(-9.0, 9.0);
+                    let c = shown.right_top() + Vec2::new(-9.0, 9.0);
                     painter.circle_filled(c, 7.0, theme::HANDLE);
                     let stroke = egui::Stroke::new(2.0, theme::SCAN_CYAN);
                     painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 3.0)], stroke);

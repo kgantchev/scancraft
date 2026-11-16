@@ -19,6 +19,7 @@ pub mod state;
 pub mod stepper;
 pub mod text;
 pub mod theme;
+pub mod thumb;
 pub mod tools;
 pub mod tray;
 
@@ -43,6 +44,10 @@ impl ScanCraftUi {
     pub fn ui(&mut self, ui: &mut egui::Ui, engine: &mut dyn EngineApi) {
         self.apply_theme(ui.ctx());
         let view = engine.view();
+        // The export options hang from the Export button, which is there only while there are pages.
+        if view.tray.is_empty() {
+            self.state.export_popover = false;
+        }
         stepper::track_work(&mut self.state, &view);
         let stage = stepper::current_stage(&self.state, &view);
         let show_tray = !view.tray.is_empty() && !self.state.tray_hidden;
@@ -299,7 +304,8 @@ impl ScanCraftUi {
         let text = self.state.text.t("Exporting the PDF…");
         ui.centered_and_justified(|ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new());
+                let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::hover());
+                theme::spinner(ui, rect, ui.visuals().text_color());
                 ui.label(text);
             });
         });
@@ -309,9 +315,11 @@ impl ScanCraftUi {
     fn confirm_export_window(&mut self, ctx: &egui::Context, waiting: usize, pages: usize) {
         let photos = self.state.text.trn(waiting as u64, "{n} photo hasn't been added.", "{n} photos haven't been added.");
         let question = self.state.text.trn(pages as u64, "Export the {n} added page?", "Export the {n} added pages?");
-        egui::Window::new("Some photos haven't been added").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-            ctx,
-            |ui| {
+        egui::Window::new(self.state.text.t("Some photos haven't been added"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
                 ui.label(format!("{photos} {question}"));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -323,8 +331,7 @@ impl ScanCraftUi {
                         self.state.confirm_export = None;
                     }
                 });
-            },
-        );
+            });
     }
 
     /// Shows a message from the app shell, such as a refused import (§4.8).
@@ -335,9 +342,12 @@ impl ScanCraftUi {
     /// The About panel.
     fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.state.about_open;
-        egui::Window::new("About ScanCraft").open(&mut open).resizable(false).show(ctx, |ui| {
-            ui.label("ScanCraft turns photos of paper documents into clean, searchable PDFs.");
-            ui.label("Version 0.1.0");
+        let title = self.state.text.t("About ScanCraft");
+        let summary = self.state.text.t("ScanCraft turns photos of paper documents into clean, searchable PDFs.");
+        let version = self.state.text.t("Version {v}").replace("{v}", env!("CARGO_PKG_VERSION"));
+        egui::Window::new(title).open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(summary);
+            ui.label(version);
         });
         self.state.about_open = open;
     }

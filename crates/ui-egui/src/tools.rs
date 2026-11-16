@@ -4,7 +4,7 @@
 //! ([`crate::stepper`]). A tool is a plain grey button, a switch or a slider; only a step button
 //! is copper.
 
-use egui::{Color32, Rect, Sense, TextureOptions, Ui, Vec2};
+use egui::{Sense, TextureOptions, Ui, Vec2};
 
 use scancraft_core::command::Command;
 use scancraft_core::engine_api::{EngineApi, ImageKey, ViewState};
@@ -29,18 +29,21 @@ pub fn crop_tools(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &m
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let title = state.text.t("Adjust the page");
         ui.heading(title);
-        let hint = state.text.t("Drag the corners onto the page's corners. Drag a side to move it; double-click a side to bend it.");
+        let hint =
+            state.text.t("Drag a corner onto each corner of the page. Drag the pill on a side to move that side; double-click it to bend the side.");
         ui.label(egui::RichText::new(hint).small().color(ui.visuals().weak_text_color()));
 
         let heading = state.text.t("Page edges");
         theme::section_heading(ui, &heading);
-        let mut auto = crop.auto_detect;
-        let label = state.text.t("Auto-Detect");
-        let response =
-            ui.checkbox(&mut auto, egui::RichText::new(label).color(theme::ink(ui))).on_hover_text(auto_detect_tooltip(&outline.corners_from));
+        // Detection is something to ask for again, not a state to switch on and off: the control
+        // is a button, off while the edges are the detected ones.
+        let reset = state.text.t("Reset to Detected Edges");
+        let source = state.text.t(&auto_detect_tooltip(&outline.corners_from));
+        let response = theme::tool_button(ui, &reset, !crop.auto_detect).on_hover_text(source.clone());
         if response.clicked() && !crop.auto_detect {
             dispatch(state, engine, Command::CropAuto { page: outline.page });
         }
+        ui.label(egui::RichText::new(source).small().color(ui.visuals().weak_text_color()));
         let full = state.text.t("Use Full Image");
         if theme::tool_button(ui, &full, true).clicked() {
             dispatch(state, engine, Command::CropFullImage { page: outline.page });
@@ -139,18 +142,17 @@ fn look_grid(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
                 .vertical(|ui| {
                     let (rect, response) = ui.allocate_exact_size(LOOK_THUMB, Sense::click());
                     let texture = state.texture(ui, engine, ImageKey::FilterThumb(enhance.page, *look), TextureOptions::LINEAR);
-                    if let Some(texture) = texture {
-                        ui.painter_at(rect).image(
-                            texture.id(),
-                            rect,
-                            Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    } else {
-                        ui.painter_at(rect).rect_filled(rect, 4.0, theme::CANVAS_BACKGROUND);
-                    }
+                    // The thumbnail keeps the page's own shape inside its box.
+                    let shown = match texture {
+                        Some(texture) => crate::thumb::paint_fitted(&ui.painter_at(rect), rect, &texture),
+                        None => {
+                            ui.painter_at(rect).rect_filled(rect, 4.0, theme::CANVAS_BACKGROUND);
+                            rect
+                        }
+                    };
                     if selected {
-                        ui.painter_at(rect).rect_stroke(rect, 4.0, egui::Stroke::new(3.0, theme::SCAN_CYAN), egui::StrokeKind::Middle);
+                        let accent = theme::accent(ui.visuals().dark_mode);
+                        ui.painter_at(rect.expand(2.0)).rect_stroke(shown, 4.0, egui::Stroke::new(3.0, accent), egui::StrokeKind::Outside);
                     }
                     ui.label(name.clone());
                     response

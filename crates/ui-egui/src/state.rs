@@ -193,6 +193,10 @@ pub struct UiState {
     pub canvas_view: CanvasView,
     /// The photo `canvas_view` is for: opening another photo starts again at the whole photo.
     pub canvas_view_of: Option<PhotoId>,
+    /// The finished page's zoom and pan on Screen 3, and the page they belong to.
+    pub enhance_canvas_view: CanvasView,
+    /// The page `enhance_canvas_view` is for.
+    pub enhance_canvas_of: Option<PageId>,
     /// The filter strip's selection: 0 is Original, 3 is Color Document.
     pub filter_index: usize,
     /// The page tray is hidden (⌥⌘T).
@@ -294,6 +298,8 @@ impl UiState {
             grab: egui::Vec2::ZERO,
             canvas_view: CanvasView::default(),
             canvas_view_of: None,
+            enhance_canvas_view: CanvasView::default(),
+            enhance_canvas_of: None,
             filter_index: 3,
             tray_hidden: false,
             export_popover: false,

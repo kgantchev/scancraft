@@ -126,6 +126,26 @@ impl CanvasView {
     }
 }
 
+/// A picture of `size` points fitted into `area` with [`PADDING`] around it, zoomed and panned by
+/// `view`: where it goes, and the view with its pan kept within bounds. The finished page on
+/// Screen 3 is placed with this, as the photo is on Screen 2.
+pub fn fit_view(area: Rect, size: (f32, f32), view: CanvasView) -> (Rect, CanvasView) {
+    let inner = area.shrink(PADDING);
+    let zoom = if view.zoom.is_finite() { view.zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { MIN_ZOOM };
+    if size.0 <= 0.0 || size.1 <= 0.0 || inner.width() <= 0.0 || inner.height() <= 0.0 {
+        return (Rect::from_center_size(area.center(), Vec2::ZERO), CanvasView { zoom, pan: Vec2::ZERO });
+    }
+    let scale = (inner.width() / size.0).min(inner.height() / size.1) * zoom;
+    let shown = Vec2::new(size.0 * scale, size.1 * scale);
+    let slack = ((shown - inner.size()) / 2.0).max(Vec2::ZERO);
+    let pan = if view.pan.x.is_finite() && view.pan.y.is_finite() {
+        Vec2::new(view.pan.x.clamp(-slack.x, slack.x), view.pan.y.clamp(-slack.y, slack.y))
+    } else {
+        Vec2::ZERO
+    };
+    (Rect::from_center_size(inner.center() + pan, shown), CanvasView { zoom, pan })
+}
+
 /// Zoom and pan from the pointer: a pinch or ⌘-scroll zooms about the pointer, a scroll or a drag
 /// on the empty canvas pans, and ⌘0 fits the whole photo again.
 ///
@@ -453,7 +473,7 @@ fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
 /// `rect`, so a canvas is never blank without saying why.
 pub fn waiting(ui: &mut Ui, rect: Rect, label: &str) {
     let spinner = Rect::from_center_size(rect.center() - Vec2::new(0.0, 14.0), Vec2::splat(28.0));
-    ui.put(spinner, egui::Spinner::new().color(Color32::from_white_alpha(200)));
+    theme::spinner(ui, spinner, Color32::from_white_alpha(200));
     let line = Rect::from_center_size(rect.center() + Vec2::new(0.0, 24.0), Vec2::new(rect.width().min(360.0), 22.0));
     ui.put(line, egui::Label::new(egui::RichText::new(label).color(Color32::from_white_alpha(200))).halign(egui::Align::Center));
 }
@@ -758,10 +778,15 @@ fn spine_handles(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState,
     changed
 }
 
-/// Sends a command to the engine and shows its error as a message (§4.8).
-pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Command) {
-    if let Err(error) = engine.dispatch(command) {
-        state.notice(error, true);
+/// Sends a command to the engine and shows its error as a message (§4.8). Returns whether the
+/// engine accepted it.
+pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Command) -> bool {
+    match engine.dispatch(command) {
+        Ok(()) => true,
+        Err(error) => {
+            state.notice(error, true);
+            false
+        }
     }
 }
 

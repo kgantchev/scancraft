@@ -165,6 +165,24 @@ pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     ui.add_enabled(enabled, button)
 }
 
+/// A spinner: three quarters of a ring that turns, drawn in `rect` in `colour`.
+///
+/// It asks for a frame twenty times a second, not for every frame as egui's own does, so a
+/// waiting screen does not keep the processor busy.
+pub fn spinner(ui: &Ui, rect: egui::Rect, colour: Color32) {
+    let time = ui.input(|i| i.time);
+    let radius = (rect.width().min(rect.height()) / 2.0 - 1.5).max(1.0);
+    let start = (time * std::f64::consts::TAU * 0.9) as f32;
+    let points: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let angle = start + std::f32::consts::TAU * 0.75 * i as f32 / 24.0;
+            rect.center() + Vec2::new(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, Stroke::new(2.0, colour)));
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+}
+
 /// A small drawn icon at the head of a toast: a red disc with an exclamation mark for an error, a
 /// neutral disc with a tick for anything else. The two differ in shape as well as in colour.
 pub fn toast_icon(ui: &mut Ui, error: bool) {

@@ -46,11 +46,11 @@ pub fn paper_name(paper: Paper) -> &'static str {
 /// The export options, in a popover from the Export chevron (§4.6).
 pub fn export_options_popover(ui: &mut Ui, state: &mut UiState) {
     let mut options = state.export_options.clone();
-    ui.label("Export options");
+    ui.label(state.text.t("Export options"));
     ui.add_space(4.0);
     // The page size.
     ui.horizontal(|ui| {
-        ui.label("Page size");
+        ui.label(state.text.t("Page size"));
         for size in [PageSizeOption::Auto, PageSizeOption::A4, PageSizeOption::UsLetter, PageSizeOption::UsLegal, PageSizeOption::A5] {
             let name = state.text.t(page_size_name(size));
             if ui.selectable_label(options.page_size == size, name).clicked() {
@@ -60,7 +60,7 @@ pub fn export_options_popover(ui: &mut Ui, state: &mut UiState) {
     });
     // The quality.
     ui.horizontal(|ui| {
-        ui.label("Quality");
+        ui.label(state.text.t("Quality"));
         for quality in [Quality::Small, Quality::Balanced, Quality::Best] {
             let name = state.text.t(quality_name(quality));
             if ui.selectable_label(options.quality == quality, name).clicked() {
@@ -71,15 +71,15 @@ pub fn export_options_popover(ui: &mut Ui, state: &mut UiState) {
     // The searchable text.
     ui.horizontal(|ui| {
         let mut searchable = options.searchable;
-        if ui.checkbox(&mut searchable, "Searchable text").changed() {
+        if ui.checkbox(&mut searchable, state.text.t("Searchable text")).changed() {
             options.searchable = searchable;
         }
     });
     // The text language. The contract has no way to ask the recogniser for the languages it
     // supports, so only Automatic is offered.
     ui.horizontal(|ui| {
-        ui.label("Text language");
-        ui.label("Automatic");
+        ui.label(state.text.t("Text language"));
+        ui.label(state.text.t("Automatic"));
     });
     ui.add_space(4.0);
     if options != state.export_options {
@@ -92,9 +92,9 @@ pub fn settings_window(ctx: &egui::Context, state: &mut UiState) {
     let mut open = state.settings_open;
     let mut changed = false;
     let mut settings = state.settings.clone();
-    egui::Window::new("Settings").open(&mut open).resizable(false).show(ctx, |ui| {
+    egui::Window::new(state.text.t("Settings")).open(&mut open).resizable(false).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Default paper");
+            ui.label(state.text.t("Default paper"));
             for paper in [Paper::IsoA(4), Paper::UsLetter, Paper::UsLegal, Paper::IsoA(5)] {
                 let name = state.text.t(paper_name(paper));
                 if ui.selectable_label(settings.default_paper == paper, name).clicked() {
@@ -105,27 +105,27 @@ pub fn settings_window(ctx: &egui::Context, state: &mut UiState) {
         });
         ui.horizontal(|ui| {
             let mut snap = settings.snap_to_paper_sizes;
-            if ui.checkbox(&mut snap, "Snap to standard paper sizes").changed() {
+            if ui.checkbox(&mut snap, state.text.t("Snap to standard paper sizes")).changed() {
                 settings.snap_to_paper_sizes = snap;
                 changed = true;
             }
         });
         ui.horizontal(|ui| {
             let mut rotate = settings.rotate_upright_automatically;
-            if ui.checkbox(&mut rotate, "Rotate pages upright automatically").changed() {
+            if ui.checkbox(&mut rotate, state.text.t("Rotate pages upright automatically")).changed() {
                 settings.rotate_upright_automatically = rotate;
                 changed = true;
             }
         });
         ui.horizontal(|ui| {
             let mut flatten = settings.flatten_curved_pages_automatically;
-            if ui.checkbox(&mut flatten, "Flatten curved pages automatically").changed() {
+            if ui.checkbox(&mut flatten, state.text.t("Flatten curved pages automatically")).changed() {
                 settings.flatten_curved_pages_automatically = flatten;
                 changed = true;
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Book page order");
+            ui.label(state.text.t("Book page order"));
             for (order, name) in [(PageOrder::LeftToRight, "Left to right"), (PageOrder::RightToLeft, "Right to left")] {
                 let name = state.text.t(name);
                 if ui.selectable_label(settings.book_page_order == order, name).clicked() {
@@ -136,20 +136,20 @@ pub fn settings_window(ctx: &egui::Context, state: &mut UiState) {
         });
         ui.horizontal(|ui| {
             let mut correction = settings.language_correction;
-            if ui.checkbox(&mut correction, "Language correction in text recognition").changed() {
+            if ui.checkbox(&mut correction, state.text.t("Language correction in text recognition")).changed() {
                 settings.language_correction = correction;
                 changed = true;
             }
         });
         ui.horizontal(|ui| {
             let mut colour = settings.keep_paper_colour;
-            if ui.checkbox(&mut colour, "Keep paper colour").changed() {
+            if ui.checkbox(&mut colour, state.text.t("Keep paper colour")).changed() {
                 settings.keep_paper_colour = colour;
                 changed = true;
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Session storage");
+            ui.label(state.text.t("Session storage"));
             ui.label(settings.session_storage.clone());
         });
     });
@@ -188,30 +188,30 @@ fn labelled_page(view: &ViewState) -> Option<PageId> {
 pub fn label_window(ctx: &egui::Context, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let mut open = state.label_open;
     let page = labelled_page(view);
-    egui::Window::new("Label for Reference Set").open(&mut open).resizable(false).show(ctx, |ui| {
+    egui::Window::new(state.text.t("Label for Reference Set")).open(&mut open).resizable(false).show(ctx, |ui| {
         if page.is_none() {
-            ui.label("Open a photo and adjust its corners first.");
+            ui.label(state.text.t("Open a photo and adjust its corners first."));
             return;
         }
         // The combo box's own label names it for a screen reader, which a separate label does not.
         let current = REFERENCE_CATEGORIES.get(state.label_category).copied().unwrap_or(REFERENCE_CATEGORIES[0]);
-        egui::ComboBox::from_label("Category").selected_text(current).show_ui(ui, |ui| {
+        egui::ComboBox::from_label(state.text.t("Category")).selected_text(current).show_ui(ui, |ui| {
             for (index, name) in REFERENCE_CATEGORIES.iter().enumerate() {
                 ui.selectable_value(&mut state.label_category, index, *name);
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Folder");
+            ui.label(state.text.t("Folder"));
             match &state.label_folder {
                 Some(folder) => ui.label(folder.as_str()),
-                None => ui.label("No folder chosen"),
+                None => ui.label(state.text.t("No folder chosen")),
             };
-            if ui.button("Choose folder…").clicked() {
+            if ui.button(state.text.t("Choose folder…")).clicked() {
                 state.actions.push(crate::state::UiAction::ChooseLabelFolder);
             }
         });
         let ready = state.label_folder.is_some();
-        if ui.add_enabled(ready, egui::Button::new("Save label")).clicked()
+        if ui.add_enabled(ready, egui::Button::new(state.text.t("Save label"))).clicked()
             && let (Some(page), Some(folder)) = (page, state.label_folder.clone())
         {
             let category = REFERENCE_CATEGORIES.get(state.label_category).copied().unwrap_or(REFERENCE_CATEGORIES[0]).to_owned();

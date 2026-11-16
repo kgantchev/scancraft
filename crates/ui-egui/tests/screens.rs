@@ -150,6 +150,11 @@ fn harness(view: ViewState, theme: egui::Theme) -> Harness<'static, TestState> {
     for page in [PageId(10), PageId(11), PageId(12)] {
         engine = engine.with_image(ImageKey::TrayThumb(page), picture(128, 176));
     }
+    harness_with(engine, theme)
+}
+
+/// The harness of an engine the test made, in one appearance.
+fn harness_with(engine: FakeEngine, theme: egui::Theme) -> Harness<'static, TestState> {
     Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .with_theme(theme)
@@ -384,7 +389,7 @@ fn the_menu_bar_has_the_items_of_the_specification() {
         "Undo",
         "Redo",
         "Delete Page",
-        "Auto-Detect",
+        "Reset to Detected Edges",
         "Use Full Image",
         "Flatten",
         "Straighten Side",
@@ -426,16 +431,99 @@ fn the_book_spreads_menu_item_sends_the_opposite_of_the_current_setting() {
     }
 }
 
+#[test]
+fn a_menu_item_is_live_only_when_it_can_act() {
+    use scancraft_ui_egui::menu::item_enabled;
+    // The Import screen: nothing to crop, turn, filter or export. These items were live and did nothing.
+    let import = import_view();
+    for id in [
+        "crop.apply",
+        "crop.auto",
+        "crop.full_image",
+        "page.rotate",
+        "page.set_look",
+        "page.add",
+        "page.open_crop",
+        "export.pdf",
+        "file.export_options",
+    ] {
+        assert!(!item_enabled(id, &import), "{id} is live on the Import screen");
+    }
+    for id in ["session.new", "file.open", "app.settings"] {
+        assert!(item_enabled(id, &import), "{id} is off on the Import screen");
+    }
+    // The crop screen: Correct Perspective acts, a filter does not. The edges are the detected
+    // ones, so there is nothing to reset.
+    let crop = crop_view();
+    assert!(item_enabled("crop.apply", &crop) && item_enabled("crop.full_image", &crop));
+    assert!(!item_enabled("page.set_look", &crop));
+    assert!(!item_enabled("crop.auto", &crop), "Reset to Detected Edges is live on detected edges");
+    let mut by_hand = crop_view();
+    by_hand.crop.as_mut().expect("the crop view").auto_detect = false;
+    assert!(item_enabled("crop.auto", &by_hand));
+    // No side is bent, so there is nothing to straighten.
+    assert!(!item_enabled("crop.straighten_side", &crop));
+    // The filter screen: a filter acts, Correct Perspective does not.
+    let enhance = enhance_view();
+    assert!(item_enabled("page.set_look", &enhance) && item_enabled("page.rotate", &enhance) && item_enabled("export.pdf", &enhance));
+    assert!(!item_enabled("crop.apply", &enhance));
+    // The first photo has no photo before it; the second has both.
+    assert!(item_enabled("page.previous", &crop) && item_enabled("page.next", &crop));
+    let mut first = crop_view();
+    {
+        let crop = first.crop.as_mut().expect("the crop view");
+        crop.photo = crop.photos[0].photo;
+    }
+    assert!(!item_enabled("page.previous", &first));
+}
+
+#[test]
+fn export_options_with_no_pages_opens_nothing_and_does_not_block_the_menus() {
+    // The item set the popover's flag with no button to hang it from, and `is_modal` then greyed
+    // out every menu for good.
+    let mut harness = harness(import_view(), egui::Theme::Light);
+    harness.run();
+    let view = import_view();
+    let command = craft_menu::CommandRef::new(scancraft_ui_egui::menu::EXPORT_OPTIONS);
+    let (ui, engine) = harness.state_mut();
+    let _ = engine;
+    ui.run_menu_command(&command, &mut FakeEngine::with_view(view));
+    assert!(!ui.is_modal(), "Export Options… with no pages made the window modal");
+}
+
+#[test]
+fn the_export_options_close_on_a_click_outside_and_the_menus_come_back() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Export options");
+    assert!(harness.state().0.is_modal(), "the options did not open");
+    // A click on the canvas, far from the popup.
+    click_at(&mut harness, egui::pos2(700.0, 300.0));
+    assert!(!harness.state().0.is_modal(), "the flag stayed set after the popup closed, so the menus stayed grey");
+}
+
 // -------------------------------------------------------------- the commands
 
 #[test]
-fn auto_detect_sends_crop_auto() {
+fn reset_to_detected_edges_sends_crop_auto() {
     let mut view = crop_view();
     view.crop.as_mut().expect("the crop view").auto_detect = false;
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Auto-Detect");
+    click_label(&mut harness, "Reset to Detected Edges");
     assert_eq!(dispatched(&harness), vec![Command::CropAuto { page: PAGE }]);
+}
+
+#[test]
+fn reset_to_detected_edges_does_nothing_while_the_edges_are_the_detected_ones() {
+    // It was a checkbox that could be ticked and never unticked. It is a button now, and it is
+    // off while there is nothing to reset.
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let node = harness.query_all_by_label("Reset to Detected Edges").next().expect("the button");
+    assert!(node.accesskit_node().is_disabled(), "the button is on while the edges are the detected ones");
+    click_label(&mut harness, "Reset to Detected Edges");
+    assert!(dispatched(&harness).is_empty(), "a click sent {:?}", dispatched(&harness));
 }
 
 #[test]
@@ -682,6 +770,21 @@ fn deleting_from_the_tray_sends_page_delete() {
     harness.key_press(egui::Key::Backspace);
     harness.run();
     assert_eq!(dispatched(&harness), vec![Command::PageDelete { page: PageId(11) }]);
+}
+
+#[test]
+fn deleting_a_page_says_so_and_offers_an_undo() {
+    // The Delete key works from every screen, and nothing on screen said that a page had gone.
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Page 2");
+    harness.key_press(egui::Key::Backspace);
+    harness.run();
+    assert!(shown_text(&harness).contains("Page 2 deleted"), "nothing said the page was deleted: {}", shown_text(&harness));
+    harness.state_mut().1.clear();
+    click_label(&mut harness, "Undo");
+    assert_eq!(dispatched(&harness), vec![Command::EditUndo]);
+    assert!(!shown_text(&harness).contains("Page 2 deleted"), "the toast stayed after its Undo was used");
 }
 
 // ------------------------------------------------------------ the geometry
@@ -985,11 +1088,11 @@ fn a_notice_of_the_engine_stays_until_it_is_dismissed() {
     view.notices = vec![Notice { text: "IMG_9.jpg is not supported".to_owned(), error: true }];
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    let with_notice = bounds_of(&harness, "Auto-Detect");
+    let with_notice = bounds_of(&harness, "Reset to Detected Edges");
     harness.state_mut().1.set_view(crop_view());
     harness.run();
     assert!(shown_text(&harness).contains("IMG_9.jpg is not supported"), "the notice went when the engine let go of it");
-    assert_eq!(bounds_of(&harness, "Auto-Detect"), with_notice, "the screen moved when the engine let go of the notice");
+    assert_eq!(bounds_of(&harness, "Reset to Detected Edges"), with_notice, "the screen moved when the engine let go of the notice");
     click_label(&mut harness, "Dismiss");
     assert!(!shown_text(&harness).contains("IMG_9.jpg is not supported"), "the notice stayed after Dismiss");
 }
@@ -1273,6 +1376,189 @@ fn the_canvas_has_room_for_a_corner_outside_the_photo() {
         assert!(canvas.workspace.expand(0.5).contains(at), "{at:?} is outside {:?}", canvas.workspace);
         assert!(!canvas.rect.contains(at), "{at:?} should be outside the photo {:?}", canvas.rect);
     }
+}
+
+// -------------------------------------------------------------- the keyboard's ring
+
+#[test]
+fn hovering_a_corner_does_not_select_it() {
+    // The keyboard's selection followed the pointer, so the corner Tab would continue from was
+    // wherever the mouse happened to rest.
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let corner = bounds_of(&harness, "Top-left corner, 120, 80").center();
+    harness.hover_at(corner);
+    harness.run();
+    assert_eq!(harness.state().0.selection(), None);
+}
+
+#[test]
+fn the_corner_the_keyboard_selected_is_ringed() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    let rings = |h: &Harness<TestState>| {
+        painted(h)
+            .into_iter()
+            .filter(|shape| matches!(shape, egui::Shape::Circle(c) if (c.radius - (scancraft_ui_egui::theme::CORNER_RADIUS + 7.0)).abs() < 1e-3))
+            .count()
+    };
+    assert_eq!(rings(&harness), 0, "a ring was drawn before anything was selected");
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+    assert_eq!(harness.state().0.selection(), Some(Selection::Corner { page: PAGE, corner: Corner::TopLeft }));
+    assert!(rings(&harness) > 0, "the selected corner has no ring");
+}
+
+#[test]
+fn arrow_keys_change_the_filter_only_when_no_widget_has_the_focus() {
+    // The arrow keys moved the filter even while the strength slider had the focus and was moving
+    // itself with them.
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    harness.key_press(egui::Key::ArrowLeft);
+    harness.run();
+    assert!(dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })), "an arrow key did nothing with no focus");
+    harness.state_mut().1.clear();
+    harness.query_all_by_label("Strength").next().expect("the strength slider").focus();
+    harness.run();
+    harness.key_press(egui::Key::ArrowLeft);
+    harness.run();
+    assert!(
+        !dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })),
+        "an arrow key changed the filter while the slider had the focus: {:?}",
+        dispatched(&harness)
+    );
+}
+
+// ------------------------------------------------------------ honest controls
+
+/// Every shape a frame painted, with the groups taken apart.
+fn painted<S>(harness: &Harness<'_, S>) -> Vec<egui::Shape> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(inner) => inner.iter().for_each(|shape| walk(shape, out)),
+            other => out.push(other.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &harness.output().shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// The rectangle of every picture a frame painted (a textured mesh that is not the font's).
+fn painted_images<S>(harness: &Harness<'_, S>) -> Vec<egui::Rect> {
+    painted(harness)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => Some(mesh.calc_bounds()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_note_s_undo_turns_the_page_back_and_nothing_else() {
+    // The Undo beside "Turned upright automatically" ran the general undo, which reverts whatever
+    // the user did last.
+    let mut view = enhance_view();
+    view.enhance.as_mut().expect("the enhance view").turned_automatically = true;
+    view.enhance.as_mut().expect("the enhance view").quarter_turns = 1;
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Undo");
+    assert_eq!(dispatched(&harness), vec![Command::PageRotate { page: PAGE, quarter_turns: -1 }]);
+}
+
+#[test]
+fn a_note_s_undo_leaves_the_page_flat_and_nothing_else() {
+    let mut view = enhance_view();
+    view.enhance.as_mut().expect("the enhance view").flattened_automatically = true;
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Undo");
+    assert_eq!(dispatched(&harness), vec![Command::CropSetFlatten { page: PAGE, mode: FlattenMode::Off }]);
+}
+
+#[test]
+fn an_unticked_checkbox_and_an_unselected_radio_button_are_not_copper() {
+    // Every control rested in copper, so an unticked checkbox was a solid copper square, and
+    // Flatten's Auto, On and Off all looked selected.
+    for theme_choice in [egui::Theme::Light, egui::Theme::Dark] {
+        let mut harness = Harness::builder().with_size(egui::vec2(400.0, 300.0)).with_theme(theme_choice).build_ui(|ui| {
+            scancraft_ui_egui::theme::apply(ui.ctx());
+            let mut ticked = false;
+            ui.checkbox(&mut ticked, "Unticked");
+            let mut mode = 1;
+            ui.radio_value(&mut mode, 0, "Not chosen");
+            ui.radio_value(&mut mode, 1, "Chosen");
+            let mut strength = 40.0;
+            ui.add(egui::Slider::new(&mut strength, 0.0..=100.0).text("Strength"));
+            let _ = ui.button("A button");
+        });
+        harness.run();
+        for shape in painted(&harness) {
+            let fill = match &shape {
+                egui::Shape::Rect(rect) => Some(rect.fill),
+                egui::Shape::Circle(circle) => Some(circle.fill),
+                _ => None,
+            };
+            let Some(fill) = fill else { continue };
+            for copper in [scancraft_ui_egui::theme::COPPER, scancraft_ui_egui::theme::LIGHT_COPPER] {
+                assert_ne!(fill, copper, "a control rests in copper in the {theme_choice:?} appearance: {shape:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_thumbnail_keeps_the_shape_of_its_page() {
+    // Every thumbnail was stretched to fill a box of one fixed shape, so a landscape page looked
+    // like a portrait one.
+    let engine = FakeEngine::with_view(enhance_view())
+        .with_image(ImageKey::LookPreview(PAGE), picture(600, 450))
+        .with_image(ImageKey::TrayThumb(PageId(10)), picture(200, 100))
+        .with_image(ImageKey::TrayThumb(PageId(11)), picture(100, 200))
+        .with_image(ImageKey::TrayThumb(PageId(12)), picture(128, 176));
+    let mut harness = harness_with(engine, egui::Theme::Light);
+    harness.run();
+    let thumbs: Vec<egui::Rect> =
+        painted_images(&harness).into_iter().filter(|r| r.width() <= 70.0 && r.height() <= 90.0 && r.width() > 8.0).collect();
+    assert!(thumbs.len() >= 3, "{} thumbnails were painted", thumbs.len());
+    let aspects: Vec<f32> = thumbs.iter().map(|r| r.width() / r.height()).collect();
+    for expected in [2.0, 0.5, 128.0 / 176.0] {
+        assert!(aspects.iter().any(|a| (a - expected).abs() < 0.02), "no thumbnail is {expected}:1; they are {aspects:?}");
+    }
+}
+
+#[test]
+fn a_tray_thumbnail_shows_its_page_number() {
+    // The number was drawn under the thumbnail, outside the area the painter could paint in.
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    let words: Vec<String> = painted(&harness)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    for number in ["1", "2", "3"] {
+        assert!(words.iter().any(|w| w == number), "page {number}'s number was not painted: {words:?}");
+    }
+}
+
+#[test]
+fn a_canvas_is_never_blank_without_saying_why() {
+    // With no picture yet, both canvases stayed empty.
+    let crop = harness_with(FakeEngine::with_view(crop_view()), egui::Theme::Light);
+    let mut crop = crop;
+    crop.run();
+    assert!(shown_text(&crop).contains("Preparing the photo"), "the crop canvas is blank: {}", shown_text(&crop));
+    let mut enhance = harness_with(FakeEngine::with_view(enhance_view()), egui::Theme::Light);
+    enhance.run();
+    assert!(shown_text(&enhance).contains("Preparing the page"), "the page canvas is blank: {}", shown_text(&enhance));
 }
 
 // -------------------------------------------------------------- the stages

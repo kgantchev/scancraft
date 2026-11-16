@@ -39,11 +39,9 @@ struct App {
 impl App {
     /// The state of a menu item for this frame.
     fn item_state(command: &craft_menu::CommandRef, view: &ViewState) -> craft_menu::ItemState {
-        let mut state = craft_menu::ItemState { enabled: true, checked: None };
+        // An item is live only when it can act on what the window shows.
+        let mut state = craft_menu::ItemState { enabled: scancraft_ui_egui::menu::item_enabled(command.id.as_str(), view), checked: None };
         match command.id.as_str() {
-            "edit.undo" => state.enabled = view.can_undo,
-            "edit.redo" => state.enabled = view.can_redo,
-            "crop.auto" => state.checked = view.crop.as_ref().map(|crop| crop.auto_detect),
             "crop.book" => state.checked = Some(view.book_spreads),
             "crop.set_flatten" => {
                 let mode = command.params.get("mode").and_then(|m| m.as_str()).unwrap_or("Auto");

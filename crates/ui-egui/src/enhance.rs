@@ -30,17 +30,26 @@ pub fn look_name(look: Look) -> &'static str {
 
 /// Draws Screen 3: the page. Its tools are in the tools panel and its buttons in the step bar.
 pub fn enhance_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    if view.enhance.is_none() {
+    let Some(enhance) = view.enhance.as_ref() else {
         return;
-    }
+    };
     let area = ui.available_rect_before_wrap();
-    let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click());
-    page_canvas(ui, state, view, rect, response.is_pointer_button_down_on(), engine);
+    let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
+    if state.enhance_canvas_of != Some(enhance.page) {
+        state.enhance_canvas_view = crate::state::CanvasView::default();
+        state.enhance_canvas_of = Some(enhance.page);
+    }
+    let mut zoom_and_pan = state.enhance_canvas_view;
+    canvas::navigate(ui, rect, &response, &mut zoom_and_pan);
+    state.enhance_canvas_view = zoom_and_pan;
+    // A press shows the Original look, until the page is zoomed in: then a drag pans it.
+    let pressed = response.is_pointer_button_down_on() && zoom_and_pan.zoom <= canvas::MIN_ZOOM;
+    page_canvas(ui, state, view, rect, pressed, engine);
     keyboard(ui, state, view, engine);
 }
 
 /// The page canvas: the flattened page, and the Original look while the page is held down
-/// (§4.4).
+/// (§4.4). It zooms and pans like the crop canvas does.
 fn page_canvas(ui: &mut Ui, state: &mut UiState, view: &ViewState, rect: Rect, pressed: bool, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else {
         return;
@@ -62,15 +71,17 @@ fn page_canvas(ui: &mut Ui, state: &mut UiState, view: &ViewState, rect: Rect, p
         }
         None => match state.textures.get(&key) {
             Some(previous) => (previous.handle.clone(), previous.image.clone()),
-            None => return,
+            None => {
+                // Nothing to show yet: say so, instead of a blank canvas.
+                theme::canvas_background(ui, rect);
+                canvas::waiting(ui, rect, &state.text.t("Preparing the page…"));
+                return;
+            }
         },
     };
     theme::canvas_background(ui, rect);
-    let size = (image.width() as f32, image.height() as f32);
-    let inner = rect.shrink(canvas::PADDING);
-    let scale = if size.0 > 0.0 && size.1 > 0.0 { (inner.width() / size.0).min(inner.height() / size.1) } else { 0.0 };
-    let shown = Vec2::new(size.0 * scale, size.1 * scale);
-    let place = Rect::from_min_size(inner.min + (inner.size() - shown) / 2.0, shown);
+    let (place, applied) = canvas::fit_view(rect, (image.width() as f32, image.height() as f32), state.enhance_canvas_view);
+    state.enhance_canvas_view = applied;
     ui.painter_at(rect).image(texture.id(), place, Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
 }
 
@@ -132,8 +143,11 @@ pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
         ui.horizontal(|ui| {
             ui.label(text);
             let undo = state.text.t("Undo");
+            // The one thing this note is about: turn the page back. The general undo would revert
+            // whatever the user did last, which may be something else.
             if ui.button(undo).clicked() {
-                canvas::dispatch(state, engine, Command::EditUndo);
+                let turned = i8::try_from(enhance.quarter_turns % 4).unwrap_or(0);
+                canvas::dispatch(state, engine, Command::PageRotate { page: enhance.page, quarter_turns: -turned });
             }
         });
     }
@@ -142,8 +156,9 @@ pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
         ui.horizontal(|ui| {
             ui.label(text);
             let undo = state.text.t("Undo");
+            // Leave this page flat: the one thing this note is about.
             if ui.button(undo).clicked() {
-                canvas::dispatch(state, engine, Command::EditUndo);
+                canvas::dispatch(state, engine, Command::CropSetFlatten { page: enhance.page, mode: scancraft_core::recipe::FlattenMode::Off });
             }
         });
     }
@@ -172,6 +187,20 @@ pub fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn Engine
 /// pick a look (§4.4).
 fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else { return };
+    // A widget that has the keyboard's focus, the strength slider say, takes the arrow keys and the
+    // digits itself; they change the look only when nothing does.
+    let taken = ui.memory(|m| m.focused().is_some());
+    if !taken {
+        arrow_and_number_keys(ui, state, view, engine);
+    }
+    // The strip's selection follows the page's look.
+    if let Some(index) = LOOKS.iter().position(|look| *look == enhance.look) {
+        state.filter_index = index;
+    }
+}
+
+/// The arrow keys move the filter strip's selection, and the number keys pick a look (§4.4).
+fn arrow_and_number_keys(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let left = ui.input(|i| i.key_pressed(Key::ArrowLeft));
     let right = ui.input(|i| i.key_pressed(Key::ArrowRight));
     if left || right {
@@ -183,9 +212,5 @@ fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn Eng
         if ui.input(|i| i.key_pressed(key)) {
             apply_look(state, view, engine, index);
         }
-    }
-    // The strip's selection follows the page's look.
-    if let Some(index) = LOOKS.iter().position(|look| *look == enhance.look) {
-        state.filter_index = index;
     }
 }

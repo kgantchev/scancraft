@@ -138,7 +138,7 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
 
     // Page.
     let mut page_items: Vec<Node> = Vec::new();
-    page_items.push(Node::Item(item(page_command("crop.auto", page, serde_json::Value::Null), "Auto-Detect", "Cmd+D")));
+    page_items.push(Node::Item(item(page_command("crop.auto", page, serde_json::Value::Null), "Reset to Detected Edges", "Cmd+D")));
     page_items.push(Node::Item(item(page_command("crop.full_image", page, serde_json::Value::Null), "Use Full Image", "Cmd+Shift+D")));
     page_items.push(Node::Submenu {
         label: "Flatten".to_owned(),
@@ -216,7 +216,40 @@ pub fn menu_state(view: &ViewState) -> u64 {
     view.can_redo.hash(&mut hasher);
     view.book_spreads.hash(&mut hasher);
     view.crop.as_ref().map(|crop| crop.auto_detect).unwrap_or(false).hash(&mut hasher);
+    // What decides whether an item is greyed out.
+    view.crop.is_some().hash(&mut hasher);
+    view.enhance.is_some().hash(&mut hasher);
+    crate::stepper::neighbour_page(view, false).is_some().hash(&mut hasher);
+    crate::stepper::neighbour_page(view, true).is_some().hash(&mut hasher);
+    view.crop
+        .as_ref()
+        .and_then(|crop| crop.outlines.first())
+        .is_some_and(|outline| Side::ALL.into_iter().any(|side| crate::canvas::side_is_curved(outline, side)))
+        .hash(&mut hasher);
     hasher.finish()
+}
+
+/// Whether a menu item can act on this view. An item that cannot is greyed out: "Correct
+/// Perspective" on the Import screen used to be live and do nothing.
+pub fn item_enabled(id: &str, view: &ViewState) -> bool {
+    let has_pages = !view.tray.is_empty();
+    let on_crop = view.crop.is_some();
+    let on_enhance = view.enhance.is_some();
+    match id {
+        "edit.undo" => view.can_undo,
+        "edit.redo" => view.can_redo,
+        "export.pdf" | EXPORT_OPTIONS | TOGGLE_TRAY => has_pages,
+        "page.delete" | "page.rotate" => on_crop || on_enhance,
+        "crop.auto" => view.crop.as_ref().is_some_and(|crop| !crop.auto_detect),
+        "crop.full_image" | "crop.apply" | "crop.book" | "crop.set_flatten" | LABEL_REFERENCE => on_crop,
+        "crop.straighten_side" => view.crop.as_ref().is_some_and(|crop| {
+            crop.outlines.first().is_some_and(|outline| Side::ALL.into_iter().any(|side| crate::canvas::side_is_curved(outline, side)))
+        }),
+        "page.open_crop" | "page.add" | "page.set_look" => on_enhance,
+        PREVIOUS_PHOTO => crate::stepper::neighbour_page(view, false).is_some(),
+        NEXT_PHOTO => crate::stepper::neighbour_page(view, true).is_some(),
+        _ => true,
+    }
 }
 
 /// Runs a menu item: the interface's own items, and the commands of the rest.
@@ -225,7 +258,9 @@ pub fn handle_menu_command(command: &CommandRef, state: &mut UiState, view: &Vie
         ABOUT => state.about_open = true,
         SETTINGS => state.settings_open = true,
         IMPORT => state.actions.push(crate::state::UiAction::ImportFiles),
-        EXPORT_OPTIONS => state.export_popover = !state.export_popover,
+        // The options hang from the Export button, which exists only while there are pages: with
+        // none, setting the flag drew nothing and the menus took a window to be open.
+        EXPORT_OPTIONS => state.export_popover = !state.export_popover && !view.tray.is_empty(),
         LABEL_REFERENCE => state.label_open = true,
         TOGGLE_TRAY => state.tray_hidden = !state.tray_hidden,
         PREVIOUS_PHOTO | NEXT_PHOTO => {
