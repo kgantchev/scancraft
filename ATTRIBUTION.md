@@ -6,6 +6,7 @@ Every asset in this repository, with its author, source and licence.
 |---|---|---|---|
 | `fixtures/flat.png`, `fixtures/curved.png`, `fixtures/spread.png` and their `.json` truth files | ScanCraft contributors | Drawn by `cargo xtask fixtures` | MIT OR Apache-2.0 |
 | `crates/io/src/helvetica.rs` (the standard Helvetica advance widths, data from the published Core 14 metrics) | ArtCraft Team and the PdfCraft contributors | PdfCraft `crates/fonts/src/std14_metrics.rs`, commit c944f106dd63eb9a33c7348eed1f03548cbd6468 | MIT OR Apache-2.0 |
+| `apps/scancraft/assets/scancraft.svg`, `scancraft-1024.png`, `scancraft-256.png`, `ScanCraft.icns` (the app icon) | ScanCraft contributors | Vectorised from the project's `scancraft.jpeg` (specification §12.1 item 5); the PNGs and the `.icns` are rendered from the SVG | MIT OR Apache-2.0 |
 
 ## Datasets the tests read
 
@@ -22,5 +23,3 @@ Eskenazi, S., Luqman, M. M., Mehri, M., Nayef, N., Ogier, J.-M., Prum, S. and Ru
 "ICDAR2015 Competition on Smartphone Document Capture and OCR (SmartDoc)", 13th International
 Conference on Document Analysis and Recognition (ICDAR), 2015. The original images remain the
 property of their authors.
-
-The app icon is still to come (specification §12.1 item 5).
