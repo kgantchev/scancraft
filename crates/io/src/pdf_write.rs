@@ -18,12 +18,20 @@
 use crate::IoError;
 use crate::encode::EncodedImage;
 use crate::text_layer::{LayerFont, MAX_CODES_PER_FONT, TYPE3_ADVANCE_EM, TextLayer};
-use chrono::{Datelike, Timelike, Utc};
 use pdf_writer::types::FontFlags;
 use pdf_writer::{Content, Date, Filter, Finish, Name, Pdf, Rect, Ref, TextStr};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
+
+/// The date every PDF carries as its creation and modification date: year, month, day, at
+/// midnight UTC.
+///
+/// The specification promises byte-identical output for the same photo and settings, and a date
+/// from the clock would make two exports a second apart differ. This is the date of the software,
+/// not of the file. It is 15 November 2026, the date of specification 2.0 that version 0.1.0 is
+/// built to, until a release has a date of its own: change it when one is cut.
+pub const PDF_DATE: (u16, u8, u8) = (2026, 11, 15);
 
 /// The largest page PDF viewers take, in points (200 inches).
 const MAX_PAGE_PT: f64 = 14_400.0;
@@ -166,17 +174,8 @@ pub fn build_pdf(pages: &[PdfPage], info: &DocInfo) -> Result<Vec<u8>, IoError> 
 
 /// The document information: the title, the producer and the two dates; nothing else.
 fn write_info(pdf: &mut Pdf, id: Ref, info: &DocInfo) {
-    let now = Utc::now();
-    let date = || {
-        Date::new(now.year().clamp(0, 9999) as u16)
-            .month(now.month() as u8)
-            .day(now.day() as u8)
-            .hour(now.hour() as u8)
-            .minute(now.minute() as u8)
-            .second(now.second() as u8)
-            .utc_offset_hour(0)
-            .utc_offset_minute(0)
-    };
+    let (year, month, day) = PDF_DATE;
+    let date = || Date::new(year).month(month).day(day).hour(0).minute(0).second(0).utc_offset_hour(0).utc_offset_minute(0);
     let mut d = pdf.document_info(id);
     d.title(TextStr(&info.title));
     d.producer(TextStr(&info.producer));
@@ -303,7 +302,7 @@ fn to_unicode_cmap(to_unicode: &[(u8, char)]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocInfo, PdfPage, build_pdf, write_atomically, write_pdf};
+    use super::{DocInfo, PDF_DATE, PdfPage, build_pdf, write_atomically, write_pdf};
     use crate::IoError;
     use crate::encode::{EncodedImage, PageImage, encode};
     use crate::text_layer::text_layer;
@@ -384,8 +383,25 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some(&b"Quarterly report"[..]));
         assert_eq!(meta.producer.as_deref(), Some(&b"ScanCraft 0.1.0 (algorithms 1)"[..]));
         let (created, modified) = (meta.creation_date.unwrap(), meta.modification_date.unwrap());
-        assert!(created.year >= 2026 && modified.year >= 2026);
         assert_eq!((created.year, created.month, created.day), (modified.year, modified.month, modified.day));
+    }
+
+    #[test]
+    fn the_same_pages_give_the_same_bytes_whenever_they_are_written() {
+        // The specification promises byte-identical output, and the release check that one thread
+        // and eight give the same PDF needs it. A date from the clock made every second differ.
+        let page = || jpeg_page(32, 32, (100.0, 100.0), None);
+        let first = build_pdf(&[page()], &info()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let second = build_pdf(&[page()], &info()).unwrap();
+        assert!(first == second, "two PDFs of the same pages, a second apart, differ");
+        // The date is the fixed one, and both dates are the same.
+        let doc = craft_pdf::open(std::sync::Arc::new(first), None).unwrap();
+        let meta = doc.metadata();
+        let (created, modified) = (meta.creation_date.unwrap(), meta.modification_date.unwrap());
+        let (year, month, day) = PDF_DATE;
+        assert_eq!((created.year, created.month, created.day), (year, month, day));
+        assert_eq!((modified.year, modified.month, modified.day), (year, month, day));
     }
 
     #[test]

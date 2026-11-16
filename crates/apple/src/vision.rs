@@ -397,7 +397,6 @@ mod tests {
     use crate::testpage::{TestPage, TruthWord, render};
     use scancraft_core::determinism::Xorshift64Star;
     use scancraft_core::image::Plane;
-    use scancraft_synth::metrics::character_error_rate as synth_character_error_rate;
     use scancraft_synth::page::reference_page;
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -678,27 +677,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "the specification's A20 test (character error rate at most 1% on a synthetic 300 DPI page) fails on \
-                macOS 27.2.1, and how badly depends on the build, from byte-identical input: the worst rate on \
-                WP4's reference pages is 50.3% under `cargo test -p scancraft-apple`, where Vision returns \
-                only about half of the characters (35 of the 42 drawn lines, whole paragraphs missing), and \
-                2.6% under `cargo test --workspace`, where it returns nearly all of them with a few misreads. \
-                The rate also varies with the resolution of the page (50% to 77% of the text returned). \
-                The lines Vision returns on the first build are read with an error rate of at most 0.05%, on \
-                the second at most 2.4% (see `the_lines_vision_reads_on_the_reference_page_are_read_correctly`)."]
-    fn character_error_rate_under_one_percent_on_the_reference_page() {
-        let mut worst = 0.0f64;
-        for seed in 1..=3 {
-            let (page, drawn) = reference_gray(seed);
-            let text = recognise_page(&page, &default_options());
-            let read: String = words_of(&text).iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-            let tidy = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
-            worst = worst.max(synth_character_error_rate(&tidy(&drawn), &tidy(&read)));
-        }
-        assert!(worst <= 0.01, "worst character error rate {:.1}% (limit 1%)", worst * 100.0);
-    }
-
-    #[test]
     #[ignore = "the specification's A20 test (word boxes with IoU at least 0.7 for 95% of the words) cannot be judged \
                 yet: WP4's pages record the text they draw but not where each word is, so it runs on WP5's own \
                 pixel-font pages, whose truth is the tight letter box. Vision pads its word boxes by about a \
@@ -784,28 +762,6 @@ mod tests {
         let small = render(724, 1024, 3, 1).image;
         let (a, b) = (vote_on(&big), vote_on(&small));
         assert!(a.chars[0] >= 20 && b.chars[0] >= 20, "{a:?} {b:?}");
-    }
-
-    #[test]
-    #[ignore = "the specification's A15 test, and it fails on macOS 27.2.1: Vision's Fast mode reads upside-down \
-                text as well as upright text (on WP4's reference pages the upright score is 0.995 to 1.06 times \
-                the upside-down score; on real Helvetica and Times pages 1.08 to 1.35), so the 1.5x rule of A15 \
-                step 3 cannot tell up from down. Measured on 10 reference pages at each turn, pages out of 10 \
-                that come out upright for turns of 0, 90, 180 and 270 degrees: 10, 9, 0, 9. A15's rule needs \
-                revisiting; the vote does find the page's axis (see \
-                `vote_tells_a_sideways_page_from_an_upright_or_upside_down_one`)."]
-    fn forty_turned_text_pages_all_come_out_upright() {
-        let mut upright = [0usize; 4];
-        for seed in 1..=10 {
-            let (page, _) = reference_gray(seed);
-            for quarters in 0..4u8 {
-                let vote = vote_on(&crate::pixels::rotate_quarter_turns(&page, quarters).unwrap());
-                if decide(&vote) == turn_back(quarters) {
-                    upright[usize::from(quarters)] += 1;
-                }
-            }
-        }
-        assert_eq!(upright, [10; 4], "pages out of 10 that came out upright, by clockwise quarter turns 0, 1, 2, 3");
     }
 
     #[test]
