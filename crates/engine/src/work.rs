@@ -21,14 +21,42 @@ const MAX_FAILED_TAGS: usize = 1024;
 
 /// What a job hands back.
 pub(crate) enum JobOutput {
-    Detected { photo: PhotoId, found: Box<DetectedPhoto> },
-    Image { key: ImageKey, cache_key: String, image: Arc<Rgb8>, notes: Vec<String> },
-    Text { page: PageId, for_key: String, text: Option<RecognizedText> },
-    Upright { page: PageId, for_key: String, turns: Option<u8>, notes: Vec<String> },
-    Flatten { page: PageId, for_key: String, result: Box<FlattenResult> },
+    Detected {
+        photo: PhotoId,
+        found: Box<DetectedPhoto>,
+    },
+    Image {
+        key: ImageKey,
+        cache_key: String,
+        image: Arc<Rgb8>,
+        notes: Vec<String>,
+    },
+    Text {
+        page: PageId,
+        for_key: String,
+        text: Option<RecognizedText>,
+    },
+    Upright {
+        page: PageId,
+        for_key: String,
+        turns: Option<u8>,
+        notes: Vec<String>,
+    },
+    Flatten {
+        page: PageId,
+        for_key: String,
+        result: Box<FlattenResult>,
+    },
     /// A30: the spine found for a spread, `None` when the photo is one page.
-    Spine { photo: PhotoId, whole: Quad, spine: Option<scancraft_detect::spread::Spine> },
-    Exported { report: ExportReport, path: PathBuf },
+    Spine {
+        photo: PhotoId,
+        whole: Quad,
+        spine: Option<scancraft_detect::spread::Spine>,
+    },
+    Exported {
+        report: ExportReport,
+        path: PathBuf,
+    },
     Decoded,
 }
 

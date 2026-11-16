@@ -229,11 +229,12 @@ pub fn handle_menu_command(command: &CommandRef, state: &mut UiState, view: &Vie
         LABEL_REFERENCE => state.label_open = true,
         TOGGLE_TRAY => state.tray_hidden = !state.tray_hidden,
         PREVIOUS_PHOTO | NEXT_PHOTO => {
-            state.notice(state.text.t("Moving between photos needs a command the engine doesn't have yet."), false);
+            if let Some(page) = crate::stepper::neighbour_page(view, command.id == NEXT_PHOTO) {
+                crate::canvas::dispatch(state, engine, Command::PageOpenCrop { page });
+            }
         }
         "export.pdf" => {
-            let options = state.export_options.clone();
-            state.actions.push(crate::state::UiAction::ExportPdf { options });
+            state.request_export(view);
         }
         "crop.straighten_side" => {
             let Some(page) = view.crop.as_ref().and_then(|crop| crop.outlines.first().map(|o| o.page)) else { return };

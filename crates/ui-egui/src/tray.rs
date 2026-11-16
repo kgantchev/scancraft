@@ -38,7 +38,7 @@ pub fn page_tray(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
             handle_thumbnail(state, item, &responses[index], &rects, index, engine);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            export_button(ui, state);
+            export_button(ui, state, view);
             let count = view.tray.len() as u64;
             let text = state.text.trn(count, "{n} page", "{n} pages");
             ui.label(text);
@@ -75,22 +75,22 @@ fn handle_thumbnail(state: &mut UiState, item: &TrayItem, response: &egui::Respo
     if response.drag_started() {
         state.tray_drag = Some((index as u32, index as u32));
     }
-    if response.clicked() {
-        if state.tray_drag.is_some() {
-            // The pointer was dragged: the drag was the action, not a click.
-            state.tray_drag = None;
-        } else {
-            state.tray_selected = Some(item.page);
-            dispatch(state, engine, Command::PageEdit { page: item.page });
-        }
-    }
     if response.dragged() {
-        let from = state.tray_drag.map(|(from, _)| from).unwrap_or(index as u32);
+        // The engine moves the page at once, so each step starts from where the page is now: the
+        // page under the pointer last frame, not the one the drag began on.
+        let from = state.tray_drag.map(|(_, at)| at).unwrap_or(index as u32);
         let to = index_under(rects, response.interact_pointer_pos());
-        state.tray_drag = Some((from, to));
         if to != from {
             dispatch(state, engine, Command::PageMove { from, to });
+            state.tray_drag = Some((from, to));
         }
+    }
+    if response.drag_stopped() {
+        state.tray_drag = None;
+        state.tray_selected = Some(item.page);
+    } else if response.clicked() {
+        state.tray_selected = Some(item.page);
+        dispatch(state, engine, Command::PageEdit { page: item.page });
     }
     let page = item.page;
     response.context_menu(|ui| {
@@ -145,11 +145,10 @@ fn delete_key(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut d
 }
 
 /// The Export to PDF button and the chevron that opens the export options (§4.5).
-fn export_button(ui: &mut Ui, state: &mut UiState) {
+fn export_button(ui: &mut Ui, state: &mut UiState, view: &ViewState) {
     let export = state.text.t("Export to PDF");
     if ui.button(export).clicked() {
-        let options = state.export_options.clone();
-        state.actions.push(crate::state::UiAction::ExportPdf { options });
+        state.request_export(view);
     }
     let chevron = state.text.t("Export options");
     let response = theme::arrow_button(ui, &chevron, theme::Arrow::Down).on_hover_text(chevron.clone());

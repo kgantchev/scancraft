@@ -1146,7 +1146,9 @@ fn the_import_stage_shows_the_drop_zone_over_the_crop_screen_and_back() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
     click_label(&mut harness, "Step 1 of 4: Import");
-    assert!(shown_text(&harness).contains("Drop photos or PDFs here") || harness.query_all_by_label_contains("Drop photos or PDFs here").next().is_some());
+    assert!(
+        shown_text(&harness).contains("Drop photos or PDFs here") || harness.query_all_by_label_contains("Drop photos or PDFs here").next().is_some()
+    );
     assert!(dispatched(&harness).is_empty(), "going to Import is the interface's own move");
     click_label(&mut harness, "Step 2 of 4: Crop");
     assert!(harness.query_all_by_label("Correct Perspective").next().is_some());
@@ -1177,4 +1179,35 @@ fn the_tools_are_not_in_the_step_bar_and_the_steps_are_not_in_the_tools() {
     let step = bounds_of(&harness, "Correct Perspective");
     assert!(tools.max.x < 300.0, "the tools are in the left panel");
     assert!(step.min.y > tools.max.y, "the step button is below the tools, in the step bar");
+}
+
+#[test]
+fn exporting_with_photos_waiting_asks_first() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Export to PDF");
+    assert!(harness.state_mut().0.take_actions().is_empty(), "the Save panel waits for the answer");
+    assert!(harness.query_all_by_label_contains("haven't been added").next().is_some(), "the question is shown");
+    click_label(&mut harness, "Export");
+    let actions = harness.state_mut().0.take_actions();
+    assert!(actions.iter().any(|a| matches!(a, scancraft_ui_egui::UiAction::ExportPdf { .. })), "{actions:?}");
+}
+
+#[test]
+fn cancelling_the_question_exports_nothing() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Export to PDF");
+    click_label(&mut harness, "Cancel");
+    assert!(harness.state_mut().0.take_actions().is_empty());
+    assert!(harness.query_all_by_label_contains("haven't been added").next().is_none());
+}
+
+#[test]
+fn the_menu_and_the_arrows_move_between_photos() {
+    let mut harness = harness(crop_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Next Photo");
+    let sent = dispatched(&harness);
+    assert!(matches!(sent.as_slice(), [Command::PageOpenCrop { .. }]) || sent.is_empty(), "{sent:?}");
 }

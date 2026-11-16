@@ -36,7 +36,8 @@ pub fn crop_tools(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &m
         theme::section_heading(ui, &heading);
         let mut auto = crop.auto_detect;
         let label = state.text.t("Auto-Detect");
-        let response = ui.checkbox(&mut auto, egui::RichText::new(label).color(theme::ink(ui))).on_hover_text(auto_detect_tooltip(&outline.corners_from));
+        let response =
+            ui.checkbox(&mut auto, egui::RichText::new(label).color(theme::ink(ui))).on_hover_text(auto_detect_tooltip(&outline.corners_from));
         if response.clicked() && !crop.auto_detect {
             dispatch(state, engine, Command::CropAuto { page: outline.page });
         }
@@ -139,7 +140,12 @@ fn look_grid(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
                     let (rect, response) = ui.allocate_exact_size(LOOK_THUMB, Sense::click());
                     let texture = state.texture(ui, engine, ImageKey::FilterThumb(enhance.page, *look), TextureOptions::LINEAR);
                     if let Some(texture) = texture {
-                        ui.painter_at(rect).image(texture.id(), rect, Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
+                        ui.painter_at(rect).image(
+                            texture.id(),
+                            rect,
+                            Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
                     } else {
                         ui.painter_at(rect).rect_filled(rect, 4.0, theme::CANVAS_BACKGROUND);
                     }

@@ -257,6 +257,11 @@ impl Engine {
         }
     }
 
+    /// Whether a PDF is being written now, so the app asks before it quits (§4.8).
+    pub fn is_exporting(&self) -> bool {
+        self.exporting.is_some()
+    }
+
     pub fn session_dir(&self) -> &PathBuf {
         self.session.dir()
     }

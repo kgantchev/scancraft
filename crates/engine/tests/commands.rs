@@ -1015,7 +1015,12 @@ fn book_spreads_put_the_cut_on_the_spine_a30_finds() {
     let bytes = std::fs::read(root.join("spread.png")).unwrap();
     let truth: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("spread.json")).unwrap()).unwrap();
     let point = |v: &serde_json::Value| Point::new(v["x"].as_f64().unwrap(), v["y"].as_f64().unwrap());
-    let quad = scancraft_core::geom::Quad([point(&truth["corners"][0]), point(&truth["corners"][1]), point(&truth["corners"][2]), point(&truth["corners"][3])]);
+    let quad = scancraft_core::geom::Quad([
+        point(&truth["corners"][0]),
+        point(&truth["corners"][1]),
+        point(&truth["corners"][2]),
+        point(&truth["corners"][3]),
+    ]);
     let spine = [point(&truth["spine"][0]), point(&truth["spine"][1])];
     let dir = TempDir::new("spine");
     let set = TempDir::new("spine-set");

@@ -128,7 +128,8 @@ pub fn tool_fill(ui: &Ui) -> Color32 {
 pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     let fill = tool_fill(ui);
     let ink = ui.visuals().text_color();
-    let button = egui::Button::new(egui::RichText::new(label).color(ink)).fill(fill).stroke(Stroke::NONE).min_size(Vec2::new(ui.available_width(), 28.0));
+    let button =
+        egui::Button::new(egui::RichText::new(label).color(ink)).fill(fill).stroke(Stroke::NONE).min_size(Vec2::new(ui.available_width(), 28.0));
     ui.add_enabled(enabled, button)
 }
 

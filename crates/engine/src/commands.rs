@@ -446,7 +446,8 @@ impl Engine {
     pub(crate) fn apply_spine(&mut self, photo: PhotoId, whole: Quad, spine: Option<scancraft_detect::spread::Spine>) -> bool {
         let halves: Vec<Page> =
             self.pending_ids(photo).iter().filter_map(|id| self.session.page(*id)).filter(|p| p.spread.is_some()).cloned().collect();
-        let untouched = halves.len() == 2 && halves.iter().all(|p| p.spread.as_ref().is_some_and(|s| s.confidence == 0.0 && s.spread_corners == whole));
+        let untouched =
+            halves.len() == 2 && halves.iter().all(|p| p.spread.as_ref().is_some_and(|s| s.confidence == 0.0 && s.spread_corners == whole));
         if !untouched {
             return false;
         }

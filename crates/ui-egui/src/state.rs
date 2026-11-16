@@ -199,6 +199,9 @@ pub struct UiState {
     pub theme: Option<egui::Theme>,
     /// The Import stage is shown above the stage the engine is at, to add more files.
     pub show_import: bool,
+    /// Export was asked for while photos were still waiting: how many, and how many pages are
+    /// added. The question "Export the added pages?" is showing.
+    pub confirm_export: Option<(usize, usize)>,
     /// How much work the last frame had (photos, tray pages), to tell when files were added.
     pub work_seen: (usize, usize),
 }
@@ -235,6 +238,7 @@ impl UiState {
             actions: Vec::new(),
             theme: None,
             show_import: false,
+            confirm_export: None,
             work_seen: (0, 0),
         }
     }
@@ -281,6 +285,23 @@ impl UiState {
         let handle = ui.ctx().load_texture(format!("scancraft-{key:?}"), color_image(&image), options);
         self.textures.insert(key, Texture { image, handle: handle.clone() });
         Some(handle)
+    }
+
+    /// Asks the shell for the Save panel, after asking whether to export when photos are still
+    /// waiting to be added (§4.8).
+    pub fn request_export(&mut self, view: &scancraft_core::engine_api::ViewState) {
+        let waiting = view.crop.as_ref().map_or(0, |crop| crop.photos.iter().filter(|tab| !tab.added).count());
+        if waiting > 0 && !view.tray.is_empty() {
+            self.confirm_export = Some((waiting, view.tray.len()));
+            return;
+        }
+        self.start_export();
+    }
+
+    /// Asks the shell for the Save panel.
+    pub fn start_export(&mut self) {
+        let options = self.export_options.clone();
+        self.actions.push(UiAction::ExportPdf { options });
     }
 
     /// Shows the loupe for a second, centred at `centre` (§4.3).

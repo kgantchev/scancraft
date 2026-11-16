@@ -12,7 +12,7 @@ use scancraft_core::command::Command;
 use scancraft_core::engine_api::{EngineApi, Screen, ViewState};
 
 use crate::canvas::dispatch;
-use crate::state::{UiAction, UiState};
+use crate::state::UiState;
 use crate::theme::{self, Direction};
 
 /// The height of the stage bar.
@@ -124,8 +124,7 @@ pub fn go_to(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, 
             }
         }
         Stage::Export => {
-            let options = state.export_options.clone();
-            state.actions.push(UiAction::ExportPdf { options });
+            state.request_export(view);
         }
     }
 }
@@ -177,7 +176,11 @@ pub fn stage_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
         let hovered = enabled && response.hovered();
         if is_current {
             painter.rect_filled(cell, 8.0, theme::COPPER.gamma_multiply(0.22));
-            painter.rect_filled(Rect::from_min_size(Pos2::new(cell.min.x + 6.0, cell.max.y - 3.0), Vec2::new(cell.width() - 12.0, 3.0)), 1.5, theme::SCAN_CYAN);
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(cell.min.x + 6.0, cell.max.y - 3.0), Vec2::new(cell.width() - 12.0, 3.0)),
+                1.5,
+                theme::SCAN_CYAN,
+            );
         } else if hovered {
             painter.rect_filled(cell, 8.0, theme::COPPER.gamma_multiply(0.12));
         }
@@ -193,9 +196,21 @@ pub fn stage_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
             painter.text(c, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(13.0), Color32::WHITE);
         } else {
             painter.circle_stroke(c, 11.0, Stroke::new(1.5, weak.gamma_multiply(if enabled { 1.0 } else { 0.5 })));
-            painter.text(c, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(13.0), weak.gamma_multiply(if enabled { 1.0 } else { 0.5 }));
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                (i + 1).to_string(),
+                FontId::proportional(13.0),
+                weak.gamma_multiply(if enabled { 1.0 } else { 0.5 }),
+            );
         }
-        let text_colour = if is_current { strong } else if enabled { theme::ink(ui) } else { weak.gamma_multiply(0.6) };
+        let text_colour = if is_current {
+            strong
+        } else if enabled {
+            theme::ink(ui)
+        } else {
+            weak.gamma_multiply(0.6)
+        };
         painter.text(Pos2::new(c.x + 20.0, cell.center().y - 8.0), Align2::LEFT_CENTER, name, FontId::proportional(15.0), text_colour);
         let hint = state.text.t(stage.hint());
         painter.text(Pos2::new(c.x + 20.0, cell.center().y + 9.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.0), weak);
