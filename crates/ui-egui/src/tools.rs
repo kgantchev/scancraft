@@ -109,6 +109,8 @@ pub fn enhance_tools(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine:
             ui.add_space(10.0);
             let mut strength = f32::from(enhance.strength);
             let response = ui.add(egui::Slider::new(&mut strength, 0.0..=100.0).text(heading));
+            // The slider moves with the arrow keys while it has the focus: they are not for the looks.
+            state.keys_taken |= response.has_focus();
             if response.changed() {
                 let value = strength.clamp(0.0, 100.0).round() as u8;
                 dispatch(state, engine, Command::PageSetStrength { page, value });

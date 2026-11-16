@@ -48,6 +48,7 @@ impl ScanCraftUi {
         if view.tray.is_empty() {
             self.state.export_popover = false;
         }
+        self.state.keys_taken = false;
         stepper::track_work(&mut self.state, &view);
         let stage = stepper::current_stage(&self.state, &view);
         let show_tray = !view.tray.is_empty() && !self.state.tray_hidden;

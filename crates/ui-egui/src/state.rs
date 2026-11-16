@@ -193,6 +193,10 @@ pub struct UiState {
     pub canvas_view: CanvasView,
     /// The photo `canvas_view` is for: opening another photo starts again at the whole photo.
     pub canvas_view_of: Option<PhotoId>,
+    /// A widget that uses the arrow keys itself (the strength slider) has the keyboard's focus this
+    /// frame, so the arrow and number keys must not also change the look. It is set while the
+    /// tools are drawn and read by the page canvas, which comes after them.
+    pub keys_taken: bool,
     /// The finished page's zoom and pan on Screen 3, and the page they belong to.
     pub enhance_canvas_view: CanvasView,
     /// The page `enhance_canvas_view` is for.
@@ -298,6 +302,7 @@ impl UiState {
             grab: egui::Vec2::ZERO,
             canvas_view: CanvasView::default(),
             canvas_view_of: None,
+            keys_taken: false,
             enhance_canvas_view: CanvasView::default(),
             enhance_canvas_of: None,
             filter_index: 3,

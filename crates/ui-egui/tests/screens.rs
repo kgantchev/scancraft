@@ -283,6 +283,47 @@ fn crop_screen_dark_snapshot() {
     );
 }
 
+/// The crop screen with the top-left corner pressed, so the loupe is open: a sharp crop of the
+/// photo (a fine chequer, so the magnification can be seen) over the display copy.
+fn loupe_snapshot(theme: egui::Theme, name: &str) {
+    let mut chequer = Vec::new();
+    for y in 0..400u32 {
+        for x in 0..400u32 {
+            let on = ((x / 8) + (y / 8)) % 2 == 0;
+            chequer.push(if on { [240, 240, 235] } else { [60, 60, 70] });
+        }
+    }
+    let crop = scancraft_core::engine_api::LoupeCrop {
+        image: Arc::new(Rgb8::from_vec(400, 400, chequer).expect("the chequer's size")),
+        origin: Point::new(120.0 - 200.0, 80.0 - 200.0),
+        scale: 1.0,
+    };
+    let mut engine = FakeEngine::with_view(crop_view()).with_image(ImageKey::DisplayCopy(PHOTO), picture(600, 450));
+    engine.set_loupe(Some(crop));
+    let mut harness = harness_with(engine, theme);
+    harness.run();
+    press_corner(&mut harness, egui::Vec2::ZERO);
+    if !can_render(&mut harness) {
+        return;
+    }
+    harness.snapshot_options(
+        name,
+        &egui_kittest::SnapshotOptions::new()
+            .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
+            .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
+    );
+}
+
+#[test]
+fn crop_screen_loupe_light_snapshot() {
+    loupe_snapshot(egui::Theme::Light, "crop_screen_loupe_light");
+}
+
+#[test]
+fn crop_screen_loupe_dark_snapshot() {
+    loupe_snapshot(egui::Theme::Dark, "crop_screen_loupe_dark");
+}
+
 #[test]
 fn enhance_screen_light_snapshot() {
     let mut harness = harness(enhance_view(), egui::Theme::Light);
@@ -1410,7 +1451,7 @@ fn the_corner_the_keyboard_selected_is_ringed() {
 }
 
 #[test]
-fn arrow_keys_change_the_filter_only_when_no_widget_has_the_focus() {
+fn arrow_keys_change_the_filter_unless_the_strength_slider_has_the_focus() {
     // The arrow keys moved the filter even while the strength slider had the focus and was moving
     // itself with them.
     let mut harness = harness(enhance_view(), egui::Theme::Light);
@@ -1426,6 +1467,22 @@ fn arrow_keys_change_the_filter_only_when_no_widget_has_the_focus() {
     assert!(
         !dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })),
         "an arrow key changed the filter while the slider had the focus: {:?}",
+        dispatched(&harness)
+    );
+}
+
+#[test]
+fn arrow_keys_still_change_the_filter_after_a_click_on_a_filter() {
+    // A click gives the clicked widget the keyboard's focus. The arrow keys must keep working.
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Grayscale filter");
+    harness.state_mut().1.clear();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    assert!(
+        dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })),
+        "the arrow key did nothing after a click: {:?}",
         dispatched(&harness)
     );
 }

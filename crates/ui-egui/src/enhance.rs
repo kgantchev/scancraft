@@ -187,10 +187,10 @@ pub fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn Engine
 /// pick a look (§4.4).
 fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else { return };
-    // A widget that has the keyboard's focus, the strength slider say, takes the arrow keys and the
-    // digits itself; they change the look only when nothing does.
-    let taken = ui.memory(|m| m.focused().is_some());
-    if !taken {
+    // The strength slider, while it has the keyboard's focus, takes the arrow keys itself; they
+    // change the look otherwise. (Any widget having the focus is not the test: a click on a look's
+    // thumbnail or on the page gives that widget the focus, and the arrow keys would then stop.)
+    if !state.keys_taken {
         arrow_and_number_keys(ui, state, view, engine);
     }
     // The strip's selection follows the page's look.
