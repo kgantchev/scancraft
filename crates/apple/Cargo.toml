@@ -44,6 +44,13 @@ objc2-vision = { workspace = true, features = ["objc2-core-foundation"] }
 [dev-dependencies]
 # Reads the recorded Vision results the parsing tests start from.
 serde_json = { workspace = true }
+# The SmartDoc gate: Apple's page detector in the loop, over a public dataset.
+scancraft-detect = { workspace = true }
+# The gate's frames are JPEG. The workspace declares `image` with its png feature; this adds the
+# jpeg one for the tests only.
+image = { workspace = true, features = ["jpeg"] }
+# The gate's frames are found in parallel.
+rayon = { workspace = true }
 # The reference page of specification §10.1, which A15's and A20's tests are written against.
 # A dev-dependency only: `cargo xtask layers` lets a layer crate use the generator in its tests.
 scancraft-synth = { workspace = true }

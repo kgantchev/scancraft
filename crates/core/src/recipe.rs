@@ -53,6 +53,32 @@ pub struct PhotoItem {
     pub focal: FocalInput,
 }
 
+/// The 18 categories of a reference set (specification §10.2).
+///
+/// The set's label file names one of these for each photo, and the interface offers them when a
+/// photo is labelled. They live here, in the shared types, so that the list the loader reads and
+/// the list the picker shows cannot drift apart.
+pub const REFERENCE_CATEGORIES: [&str; 18] = [
+    "dark desk",
+    "light desk",
+    "wood",
+    "patterned cloth",
+    "finger on an edge",
+    "finger on a corner",
+    "corner outside the frame",
+    "receipt",
+    "coloured paper",
+    "glare",
+    "low light",
+    "sideways page",
+    "open book page",
+    "book spread",
+    "curled receipt",
+    "letter folded in three",
+    "sheet held in the hand",
+    "magazine",
+];
+
 /// Which detector found the corners (Screen 2's Auto-Detect tooltip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Detector {

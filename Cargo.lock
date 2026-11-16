@@ -4076,7 +4076,9 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "objc2-vision",
+ "rayon",
  "scancraft-core",
+ "scancraft-detect",
  "scancraft-raster",
  "scancraft-synth",
  "serde_json",
@@ -4116,6 +4118,7 @@ dependencies = [
  "scancraft-geom",
  "scancraft-raster",
  "scancraft-synth",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -4133,6 +4136,7 @@ dependencies = [
  "scancraft-geom",
  "scancraft-io",
  "scancraft-raster",
+ "scancraft-synth",
  "serde",
  "serde_json",
  "sha2",
@@ -4165,7 +4169,6 @@ dependencies = [
 name = "scancraft-io"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "craft-atomic",
  "craft-cms",
  "craft-heif",

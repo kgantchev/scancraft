@@ -21,3 +21,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 scancraft-synth = { workspace = true }
+# The SmartDoc gate's frames are JPEG. The workspace declares `image` with its png feature; this
+# adds the jpeg one for the tests only, and the library itself keeps the smaller set.
+image = { workspace = true, features = ["jpeg"] }
+# Writes the results and the report beside the dataset.
+serde_json = { workspace = true }

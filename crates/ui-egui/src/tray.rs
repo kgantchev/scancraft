@@ -95,7 +95,7 @@ fn handle_thumbnail(state: &mut UiState, item: &TrayItem, response: &egui::Respo
     let page = item.page;
     response.context_menu(|ui| {
         if ui.button("Edit Crop").clicked() {
-            dispatch(state, engine, Command::PageEdit { page });
+            dispatch(state, engine, Command::PageOpenCrop { page });
         }
         if ui.button("Rotate Left").clicked() {
             dispatch(state, engine, Command::PageRotate { page, quarter_turns: -1 });

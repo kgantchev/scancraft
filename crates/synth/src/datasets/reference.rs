@@ -27,27 +27,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// The 18 categories of §10.2.
-pub const CATEGORIES: [&str; 18] = [
-    "dark desk",
-    "light desk",
-    "wood",
-    "patterned cloth",
-    "finger on an edge",
-    "finger on a corner",
-    "corner outside the frame",
-    "receipt",
-    "coloured paper",
-    "glare",
-    "low light",
-    "sideways page",
-    "open book page",
-    "book spread",
-    "curled receipt",
-    "letter folded in three",
-    "sheet held in the hand",
-    "magazine",
-];
+/// The 18 categories of §10.2, from the shared types.
+pub const CATEGORIES: [&str; 18] = scancraft_core::recipe::REFERENCE_CATEGORIES;
 
 /// The six categories whose pages are bent (a spread is one category, in either reading order).
 pub const BENT_CATEGORIES: [&str; 6] =

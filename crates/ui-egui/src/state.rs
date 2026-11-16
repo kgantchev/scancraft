@@ -142,6 +142,8 @@ pub enum UiAction {
     ShowAbout,
     /// The Settings window's values changed (§4.6).
     SettingsChanged(Settings),
+    /// Open the folder panel for the reference set the labels are written to (§10.2).
+    ChooseLabelFolder,
 }
 
 /// Everything the interface remembers between frames.
@@ -166,6 +168,12 @@ pub struct UiState {
     pub settings_open: bool,
     /// The About panel is open.
     pub about_open: bool,
+    /// The window that labels a photo for a reference set is open.
+    pub label_open: bool,
+    /// The category chosen in that window: an index into `REFERENCE_CATEGORIES`.
+    pub label_category: usize,
+    /// The folder of the reference set the labels are written to, once one has been chosen.
+    pub label_folder: Option<String>,
     /// The export options (§4.6).
     pub export_options: ExportOptions,
     /// The Settings window's values (§4.6).
@@ -202,6 +210,9 @@ impl UiState {
             export_popover: false,
             settings_open: false,
             about_open: false,
+            label_open: false,
+            label_category: 0,
+            label_folder: None,
             export_options: ExportOptions::default(),
             settings: Settings::default(),
             notices: Vec::new(),

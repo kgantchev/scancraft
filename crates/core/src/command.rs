@@ -71,6 +71,14 @@ pub enum Command {
     PageMove { from: u32, to: u32 },
     #[serde(rename = "page.edit")]
     PageEdit { page: PageId },
+    /// Opens the crop screen (Screen 2) for a page, with that page's corners (the "Back to Crop"
+    /// of §4.7 and the tray's "Edit Crop").
+    #[serde(rename = "page.open_crop")]
+    PageOpenCrop { page: PageId },
+    /// Writes the page's corners into the reference set's label file (specification §10.2), as a
+    /// photo of the `category` category. The label file is merged with what is already there.
+    #[serde(rename = "reference.label")]
+    ReferenceLabel { page: PageId, folder: String, category: String },
     #[serde(rename = "export.pdf")]
     ExportPdf { path: String, options: ExportOptions },
     #[serde(rename = "session.new")]
@@ -106,6 +114,8 @@ impl Command {
         "page.delete",
         "page.move",
         "page.edit",
+        "page.open_crop",
+        "reference.label",
         "export.pdf",
         "session.new",
         "session.restore",
@@ -122,6 +132,7 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::Command;
+    use crate::recipe::PageId;
 
     #[test]
     fn commands_parse_by_id() {
@@ -129,5 +140,21 @@ mod tests {
         assert_eq!(c, Command::CropBook { on: true });
         assert!(Command::from_json(r#"{"id":"crop.nope","params":{}}"#).is_err());
         assert_eq!(Command::from_json(r#"{"id":"edit.undo"}"#).unwrap(), Command::EditUndo);
+    }
+
+    #[test]
+    fn the_two_new_commands_parse_and_are_listed() {
+        let crop = Command::from_json(r#"{"id":"page.open_crop","params":{"page":3}}"#).unwrap();
+        assert_eq!(crop, Command::PageOpenCrop { page: PageId(3) });
+        let label = Command::from_json(r#"{"id":"reference.label","params":{"page":4,"folder":"/tmp/set","category":"dark desk"}}"#).unwrap();
+        assert_eq!(label, Command::ReferenceLabel { page: PageId(4), folder: "/tmp/set".to_string(), category: "dark desk".to_string() });
+        // Every id is in the list once, and the list has no repeats.
+        let mut ids = Command::IDS.to_vec();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "the list of ids has a repeat");
+        assert!(Command::IDS.contains(&"page.open_crop"));
+        assert!(Command::IDS.contains(&"reference.label"));
     }
 }
