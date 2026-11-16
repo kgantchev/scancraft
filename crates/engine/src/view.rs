@@ -40,7 +40,22 @@ impl Engine {
         let pages: Vec<&Page> = self.session.pending().iter().filter(|p| p.photo == photo).collect();
         let outlines: Vec<OutlineView> = pages.iter().map(|p| self.outline(p)).collect();
         let first = pages.first();
+        let photos = file
+            .photos
+            .iter()
+            .map(|p| {
+                let pending = self.session.pending().iter().find(|q| q.photo == p.id);
+                let added = self.session.file().pages.iter().find(|q| q.photo == p.id);
+                scancraft_core::engine_api::PhotoTab {
+                    photo: p.id,
+                    page: pending.or(added).map(|q| q.id),
+                    name: p.name.clone(),
+                    added: pending.is_none() && added.is_some(),
+                }
+            })
+            .collect();
         Some(CropView {
+            photos,
             photo,
             position: (index as u32 + 1, file.photos.len() as u32),
             photo_size: item.size,

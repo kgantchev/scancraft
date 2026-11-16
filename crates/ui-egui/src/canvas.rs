@@ -144,21 +144,16 @@ fn quad_point(quad: &Quad, index: usize) -> Point {
 
 /// The polyline of one side of the outline, in photo pixels.
 ///
-/// A straight side is a straight line, a traced side follows its samples, and a bent side is the
-/// spline through its two corners and its three handles.
+/// A straight side is a straight line, and a bent side is the spline through its two corners and
+/// its three handles, which the interface keeps on one parabola so a single vertex moves them.
 pub fn side_points(outline: &OutlineView, side: Side) -> Vec<Point> {
     let (a, b) = side.corners();
     let start = quad_point(&outline.corners, a);
     let end = quad_point(&outline.corners, b);
     match &outline.sides[side.index()] {
-        SideShape::Straight | SideShape::Spine => vec![start, end],
-        SideShape::Traced { samples, .. } => {
-            let mut points = Vec::with_capacity(samples.len() + 2);
-            points.push(start);
-            points.extend(samples.iter().map(|s| s.point));
-            points.push(end);
-            points
-        }
+        // A side the engine traced is evidence for flattening the page, not an outline to show:
+        // the outline is the four corners, and only a side the user bent has a curve.
+        SideShape::Straight | SideShape::Spine | SideShape::Traced { .. } => vec![start, end],
         SideShape::Bent { handles } => {
             let mut control = Vec::with_capacity(5);
             control.push(start);
@@ -171,11 +166,7 @@ pub fn side_points(outline: &OutlineView, side: Side) -> Vec<Point> {
 
 /// Whether a side is curved, and so has bend handles (§4.3).
 pub fn side_is_curved(outline: &OutlineView, side: Side) -> bool {
-    match &outline.sides[side.index()] {
-        SideShape::Traced { curved, .. } => *curved,
-        SideShape::Bent { .. } => true,
-        _ => false,
-    }
+    matches!(&outline.sides[side.index()], SideShape::Bent { .. })
 }
 
 /// The bend handles of a side, in photo pixels: the side's own handles when it is bent, and the
@@ -183,12 +174,24 @@ pub fn side_is_curved(outline: &OutlineView, side: Side) -> bool {
 pub fn bend_handles(outline: &OutlineView, side: Side) -> Vec<Point> {
     match &outline.sides[side.index()] {
         SideShape::Bent { handles } => handles.to_vec(),
-        SideShape::Traced { .. } => {
-            let points = side_points(outline, side);
-            points_at_fractions(&points, &[0.25, 0.5, 0.75])
-        }
         _ => Vec::new(),
     }
+}
+
+/// The index of the one bend handle the interface shows: the middle one.
+pub const BEND_VERTEX: usize = 1;
+
+/// The three handles of a side bent through `middle`: a parabola from one corner to the other that
+/// passes through it, sampled at a quarter, half and three quarters.
+pub fn bend_through(outline: &OutlineView, side: Side, middle: Point) -> [Point; 3] {
+    let (a, b) = side.corners();
+    let (start, end) = (quad_point(&outline.corners, a), quad_point(&outline.corners, b));
+    let chord_middle = Point::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+    let (dx, dy) = (middle.x - chord_middle.x, middle.y - chord_middle.y);
+    [0.25, 0.5, 0.75].map(|t: f64| {
+        let k = 4.0 * t * (1.0 - t);
+        Point::new(start.x + (end.x - start.x) * t + dx * k, start.y + (end.y - start.y) * t + dy * k)
+    })
 }
 
 /// The points at the given fractions of a polyline's arc length.
@@ -230,14 +233,9 @@ pub fn points_at_fractions(points: &[Point], fractions: &[f64]) -> Vec<Point> {
     out
 }
 
-/// The interior of the outline, as a closed polygon in photo points: the fitted outline when the
-/// page is flattened, and the four corners with their curves otherwise.
+/// The interior of the outline, as a closed polygon in photo points: the four corners, with the
+/// curve of a side the user bent.
 pub fn outline_polygon(outline: &OutlineView) -> Vec<Point> {
-    if let Some(fitted) = &outline.fitted
-        && fitted.len() >= 3
-    {
-        return fitted.clone();
-    }
     let top = side_points(outline, Side::Top);
     let right = side_points(outline, Side::Right);
     let bottom = side_points(outline, Side::Bottom);
@@ -247,6 +245,11 @@ pub fn outline_polygon(outline: &OutlineView) -> Vec<Point> {
     points.extend(right.into_iter().skip(1));
     points.extend(bottom.into_iter().rev().skip(1));
     points.extend(left.into_iter().rev().skip(1));
+    // The walk ends on the first point; a polygon does not repeat it, and the triangulation drew
+    // only half of the page's inside when it did.
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
     points
 }
 
@@ -418,28 +421,25 @@ pub fn draw_outline(painter: &Painter, canvas: &Canvas, outline: &OutlineView) {
     painter.add(Shape::line(canvas_points, Stroke::new(theme::OUTLINE_WIDTH, colour)));
 }
 
-/// The outline's path in photo pixels: the fitted outline when the page is flattened, and the
-/// four sides otherwise.
+/// The outline's path in photo pixels: the four sides, walked clockwise from the top-left corner
+/// back to it. A side is stored in its drawing order (bottom from the left corner, left from the
+/// top one), so the bottom and the left are walked backwards; walking them as stored made the
+/// outline double back across the page and left the left side open.
 pub fn outline_path(outline: &OutlineView) -> Vec<Point> {
-    if let Some(fitted) = &outline.fitted
-        && fitted.len() >= 3
-    {
-        return fitted.clone();
-    }
-    let mut points = Vec::new();
-    for side in Side::ALL {
-        let side_points = side_points(outline, side);
-        if matches!(outline.sides[side.index()], SideShape::Spine) {
-            // The spine is drawn on its own, dashed (§4.3).
-            continue;
+    let mut points: Vec<Point> = Vec::new();
+    for (side, backwards) in [(Side::Top, false), (Side::Right, false), (Side::Bottom, true), (Side::Left, true)] {
+        // The spine is drawn on its own, dashed (§4.3): its chord is all the outline needs here.
+        let mut line = side_points(outline, side);
+        if backwards {
+            line.reverse();
         }
-        let skip = if points.is_empty() { 0 } else { 1 };
-        points.extend(side_points.into_iter().skip(skip));
+        let skip = usize::from(!points.is_empty());
+        points.extend(line.into_iter().skip(skip));
     }
     points
 }
 
-/// Draws the handles of one outline: the four corners, the edge handles and the bend handles.
+/// Draws the handles of one outline: the four corners, and the one vertex of a side the user bent.
 pub fn draw_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, state: &mut UiState, engine: &mut dyn EngineApi) {
     let now = ui.input(|i| i.time);
     for (index, corner) in [Corner::TopLeft, Corner::TopRight, Corner::BottomRight, Corner::BottomLeft].into_iter().enumerate() {
@@ -451,7 +451,7 @@ pub fn draw_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, state: &mut
         if side_is_curved(outline, side) {
             draw_bend_handles(ui, canvas, outline, side, state, engine, now);
         } else {
-            draw_edge_handle(ui, canvas, outline, side, state, engine, now);
+            side_double_click(ui, canvas, outline, side, state, engine);
         }
     }
 }
@@ -492,91 +492,48 @@ fn draw_corner(
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::corner_label(corner, point)));
 }
 
-/// Draws the edge handle of a side: a 6 × 22 pt pill at the side's middle (§4.3).
-fn draw_edge_handle(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi, now: f64) {
+/// A double-click near the middle of a straight side gives it its one vertex, which then bends it
+/// (§4.3). Nothing is drawn: the outline is the four corners until the user asks for more.
+fn side_double_click(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi) {
     let middle = side_middle(&outline.corners, side);
     let position = canvas.photo_to_canvas(middle);
-    let Some(normal) = outward_normal(&outline.corners, side) else {
-        return;
-    };
-    let painter = ui.painter_at(canvas.rect);
-    // The pill lies along the side.
-    let along = Pos2::new(normal.y as f32, -normal.x as f32);
-    let size = if along.x.abs() > along.y.abs() { Vec2::new(theme::EDGE_HANDLE.y, theme::EDGE_HANDLE.x) } else { theme::EDGE_HANDLE };
-    painter.rect_filled(Rect::from_center_size(position, size), size.x / 2.0, theme::HANDLE);
-    painter.rect_stroke(
-        Rect::from_center_size(position, size),
-        size.x / 2.0,
-        Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN),
-        egui::StrokeKind::Middle,
-    );
     let id = ui.make_persistent_id(("scancraft.edge", outline.page, side.index()));
     let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-    let response = ui.interact(hit, id, Sense::click_and_drag());
+    let response = ui.interact(hit, id, Sense::click());
     if response.double_clicked() {
-        // A double-click on a straight side gives it bend handles (§4.3).
-        let (a, b) = side.corners();
-        let start = quad_point(&outline.corners, a);
-        let end = quad_point(&outline.corners, b);
-        let points = points_at_fractions(&[start, end], &[0.25, 0.5, 0.75]);
-        if points.len() == 3 {
-            dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles: [points[0], points[1], points[2]] });
-        }
+        let handles = bend_through(outline, side, middle);
+        dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles });
     }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} side: double-click to bend", a11y::side_name(side))));
+}
+
+/// Draws the one vertex of a bent side: a 10 pt white dot with a 2 pt cyan ring at the middle of
+/// its curve (§4.3).
+fn draw_bend_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi, now: f64) {
+    let handles = bend_handles(outline, side);
+    let Some(handle) = handles.get(BEND_VERTEX) else { return };
+    let painter = ui.painter_at(canvas.rect);
+    let position = canvas.photo_to_canvas(*handle);
+    painter.circle_filled(position, theme::BEND_RADIUS, theme::HANDLE);
+    painter.circle_stroke(position, theme::BEND_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
+    let id = ui.make_persistent_id(("scancraft.bend", outline.page, side.index(), BEND_VERTEX));
+    let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
+    let response = ui.interact(hit, id, Sense::click_and_drag());
     if response.dragged()
         && let Some(pointer) = response.interact_pointer_pos()
     {
-        let pointer_photo = canvas.canvas_to_photo(pointer);
-        let projection = (pointer_photo.x - middle.x) * normal.x + (pointer_photo.y - middle.y) * normal.y;
-        // The engine's offset moves the side from where it is now, so the interface sends the
-        // change since the last frame.
-        let delta = match &state.edge_drag {
-            Some(drag) if drag.page == outline.page && drag.side == side => projection - drag.last,
-            _ => projection,
-        };
-        if delta.abs() > 1e-9 {
-            dispatch(state, engine, Command::CropMoveSide { page: outline.page, side, offset: delta });
-        }
-        state.edge_drag = Some(crate::state::EdgeDrag { page: outline.page, side, middle, normal, last: projection });
+        let moved = bend_through(outline, side, canvas.canvas_to_photo(pointer));
+        dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles: moved });
+        state.selection = Some(Selection::Bend { page: outline.page, side, index: BEND_VERTEX });
         state.show_loupe(now, pointer);
-    } else {
-        state.edge_drag = None;
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, format!("{} side handle", a11y::side_name(side))));
-}
-
-/// Draws the three bend handles of a curved side: 10 pt white dots with a 2 pt cyan ring, at a
-/// quarter, half and three quarters of the side's length (§4.3).
-fn draw_bend_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi, now: f64) {
-    let handles = bend_handles(outline, side);
-    if handles.len() < 3 {
-        return;
-    }
-    let painter = ui.painter_at(canvas.rect);
-    for (index, handle) in handles.iter().enumerate() {
-        let position = canvas.photo_to_canvas(*handle);
-        painter.circle_filled(position, theme::BEND_RADIUS, theme::HANDLE);
-        painter.circle_stroke(position, theme::BEND_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
-        let id = ui.make_persistent_id(("scancraft.bend", outline.page, side.index(), index));
-        let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-        let response = ui.interact(hit, id, Sense::click_and_drag());
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let mut moved = handles.clone();
-            moved[index] = canvas.canvas_to_photo(pointer);
-            dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles: [moved[0], moved[1], moved[2]] });
-            state.selection = Some(Selection::Bend { page: outline.page, side, index });
-            state.show_loupe(now, pointer);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::bend_label(side, BEND_VERTEX)));
+    let page = outline.page;
+    response.context_menu(|ui| {
+        if ui.button("Straighten Side").clicked() {
+            dispatch(state, engine, Command::CropStraightenSide { page, side });
         }
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::bend_label(side, index)));
-        let page = outline.page;
-        response.context_menu(|ui| {
-            if ui.button("Straighten Side").clicked() {
-                dispatch(state, engine, Command::CropStraightenSide { page, side });
-            }
-        });
-    }
+    });
 }
 
 /// Sends a command to the engine and shows its error as a message (§4.8).
@@ -614,5 +571,59 @@ pub fn draw_spine(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState
             state.show_loupe(now, pointer);
         }
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::spine_label(index)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scancraft_core::recipe::{CornerOrigin, FlattenMode, PageId};
+
+    fn outline() -> OutlineView {
+        OutlineView {
+            page: PageId(1),
+            corners: Quad([Point::new(0.0, 0.0), Point::new(100.0, 0.0), Point::new(100.0, 200.0), Point::new(0.0, 200.0)]),
+            corners_from: CornerOrigin::Manual,
+            sides: Default::default(),
+            fitted: None,
+            half: None,
+            invalid: None,
+            flatten: FlattenMode::Auto,
+            flatten_decision: None,
+        }
+    }
+
+    #[test]
+    fn a_vertex_on_the_chord_keeps_the_side_straight() {
+        let handles = bend_through(&outline(), Side::Top, Point::new(50.0, 0.0));
+        assert_eq!(handles, [Point::new(25.0, 0.0), Point::new(50.0, 0.0), Point::new(75.0, 0.0)]);
+    }
+
+    #[test]
+    fn a_dragged_vertex_bends_the_side_on_one_parabola() {
+        let handles = bend_through(&outline(), Side::Top, Point::new(50.0, -20.0));
+        assert_eq!(handles[1], Point::new(50.0, -20.0));
+        // A quarter along, a parabola has gone three quarters of the way to the vertex.
+        assert!((handles[0].y + 15.0).abs() < 1e-9 && (handles[2].y + 15.0).abs() < 1e-9, "{handles:?}");
+    }
+
+    #[test]
+    fn the_outline_is_one_closed_loop_of_the_four_corners() {
+        let o = outline();
+        let c = o.corners.0;
+        assert_eq!(outline_path(&o), vec![c[0], c[1], c[2], c[3], c[0]]);
+    }
+
+    #[test]
+    fn a_traced_side_is_drawn_straight_and_has_no_vertex() {
+        let mut o = outline();
+        o.sides[Side::Top.index()] = SideShape::Traced {
+            samples: vec![scancraft_core::recipe::SideSample { point: Point::new(50.0, 40.0), weight: 1.0 }],
+            bow: 0.2,
+            curved: true,
+        };
+        assert_eq!(side_points(&o, Side::Top).len(), 2);
+        assert!(bend_handles(&o, Side::Top).is_empty());
+        assert!(!side_is_curved(&o, Side::Top));
     }
 }

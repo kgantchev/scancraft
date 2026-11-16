@@ -973,7 +973,7 @@ fn image_of(key: &scancraft_core::engine_api::ImageKey, page: PageId) -> bool {
     use scancraft_core::engine_api::ImageKey;
     match key {
         ImageKey::LookPreview(p) | ImageKey::FilterThumb(p, _) | ImageKey::TrayThumb(p) => *p == page,
-        ImageKey::DisplayCopy(_) => false,
+        ImageKey::DisplayCopy(_) | ImageKey::PhotoThumb(_) => false,
     }
 }
 

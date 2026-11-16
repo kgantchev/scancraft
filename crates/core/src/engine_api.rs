@@ -34,8 +34,21 @@ pub struct OutlineView {
     pub flatten_decision: Option<FlattenDecision>,
 }
 
+/// One photo of the batch, for the strip along Screen 2 that switches between them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhotoTab {
+    pub photo: PhotoId,
+    /// A page of the photo to open with `PageOpenCrop`; `None` while the photo is still being read.
+    pub page: Option<PageId>,
+    pub name: String,
+    /// Every page of the photo is in the tray.
+    pub added: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CropView {
+    /// Every photo of the batch, in import order.
+    pub photos: Vec<PhotoTab>,
     pub photo: PhotoId,
     /// "Photo 2 of 7".
     pub position: (u32, u32),
@@ -103,6 +116,8 @@ pub enum ImageKey {
     FilterThumb(PageId, Look),
     /// A tray thumbnail, 256 px.
     TrayThumb(PageId),
+    /// A photo's thumbnail for Screen 2's strip, long side 256 px.
+    PhotoThumb(PhotoId),
 }
 
 /// A square cut from the full-resolution photo for the loupe (§6.5).
