@@ -82,6 +82,8 @@ pub(crate) enum Target {
     Photo(PhotoId),
     /// The live preview of a page: a newer request replaces the one before it.
     Preview(PageId),
+    /// A29's decision for a page: it outlives the page's look changes, and a newer request replaces it.
+    Flatten(PageId),
     /// The export.
     Export,
 }

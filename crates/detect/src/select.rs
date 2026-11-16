@@ -7,14 +7,14 @@
 use crate::DetectError;
 use crate::edges::EdgeMaps;
 use crate::refine::{self, Refined};
-use crate::shapes::{add, bilinear_rgb, clip_to_rect, corner_angles, in_allowed_area, median, overlap_iou, polygon_area, side_ends, side_frame};
+use crate::shapes::{add, bilinear_rgb, clip_to_rect, corner_angles, in_allowed_area, median, overlap_iou, polygon_area, side_ends, side_frame, sub};
 use rayon::prelude::*;
 use scancraft_core::Step;
 use scancraft_core::determinism::seed_for;
 use scancraft_core::geom::{Point, Quad, Side};
 use scancraft_core::image::{Plane, RgbF32};
 use scancraft_core::pyramid::LumaPyramid;
-use scancraft_core::recipe::Detector;
+use scancraft_core::recipe::{Detector, SideShape};
 use scancraft_raster::colour::oklab;
 use std::cmp::Ordering;
 
@@ -119,6 +119,9 @@ pub struct Selection {
     pub by: Option<Detector>,
     /// The score of the chosen candidate after refinement; 0 when nothing was found.
     pub score: f64,
+    /// A25's trace of the chosen candidate's sides, in photo pixels; every side `Straight` when
+    /// nothing was found.
+    pub sides: [SideShape; 4],
 }
 
 /// A9 step 5's score of one candidate in work-image pixels; `tau` is 3 before refinement, 2 after.
@@ -129,15 +132,31 @@ pub fn score(quad: &Quad, maps: &EdgeMaps, work: &RgbF32, tau: f64) -> Result<f6
     score_prepared(quad, &prepared, tau)
 }
 
-/// The score of one candidate, from the prepared edge maps.
+/// The score of one candidate, from the prepared edge maps, with every side taken as straight.
 pub fn score_prepared(quad: &Quad, prepared: &Prepared, tau: f64) -> Result<f64, DetectError> {
+    score_traced(quad, None, prepared, tau)
+}
+
+/// A candidate's sides as A25 traced them, with the factors that turn their photo pixels into the
+/// work image's (A9 step 6.2).
+#[derive(Debug, Clone, Copy)]
+pub struct Traces<'a> {
+    pub sides: &'a [SideShape; 4],
+    pub kx: f64,
+    pub ky: f64,
+}
+
+/// The score of one candidate. A side that A25 marked curved is scored along its traced path
+/// instead of its straight line, so a bent page isn't marked down for bending (A9 step 6.2).
+pub fn score_traced(quad: &Quad, traces: Option<Traces<'_>>, prepared: &Prepared, tau: f64) -> Result<f64, DetectError> {
     let (w, h) = (prepared.width, prepared.height);
     if !is_valid(quad, w, h) {
         return Ok(0.0);
     }
     let mut sides = Vec::with_capacity(4);
     for side in Side::ALL {
-        sides.push(measure(quad, side, prepared, tau));
+        let path = traces.and_then(|t| curved_path(quad, side, &t));
+        sides.push(measure(quad, side, prepared, tau, path.as_deref()));
     }
     let support: f64 = sides.iter().map(|s| s.support).sum::<f64>() / 4.0;
     let contrasts: Vec<f64> = sides.iter().filter(|s| !s.border).map(|s| s.contrast).collect();
@@ -156,6 +175,26 @@ pub fn score_prepared(quad: &Quad, prepared: &Prepared, tau: f64) -> Result<f64,
         }
     }
     Ok(value)
+}
+
+/// Which sides of a candidate lie at the photo's border (A9 step 2): A25 doesn't trace them.
+pub fn border_sides(quad: &Quad, prepared: &Prepared, tau: f64) -> [bool; 4] {
+    Side::ALL.map(|side| measure(quad, side, prepared, tau, None).border)
+}
+
+/// The path of a side that A25 marked curved, in work-image pixels, from one corner through the
+/// samples to the other; `None` for any other side.
+fn curved_path(quad: &Quad, side: Side, traces: &Traces<'_>) -> Option<Vec<Point>> {
+    let SideShape::Traced { samples, curved: true, .. } = traces.sides.get(side.index())? else { return None };
+    if samples.len() < 2 || !(traces.kx > 0.0 && traces.ky > 0.0) {
+        return None;
+    }
+    let (a, b) = side_ends(quad, side);
+    let mut path = Vec::with_capacity(samples.len() + 2);
+    path.push(a);
+    path.extend(samples.iter().map(|s| Point::new(s.point.x / traces.kx, s.point.y / traces.ky)));
+    path.push(b);
+    path.iter().all(|p| p.is_finite()).then_some(path)
 }
 
 /// Whether a candidate may be used at all (A9 step 1).
@@ -204,21 +243,28 @@ fn area_share(quad: &Quad, width: u32, height: u32) -> f64 {
     polygon_area(&clipped) / image_area
 }
 
-/// What A9 measured about one side (A9 steps 2 and 3).
-fn measure(quad: &Quad, side: Side, prepared: &Prepared, tau: f64) -> SideMeasure {
+/// What A9 measured about one side (A9 steps 2 and 3), along `path` when it has one, and along the
+/// straight line between its corners otherwise.
+fn measure(quad: &Quad, side: Side, prepared: &Prepared, tau: f64, path: Option<&[Point]>) -> SideMeasure {
     let (w, h) = (f64::from(prepared.width), f64::from(prepared.height));
     let (a, b) = side_ends(quad, side);
-    let (dir, normal) = side_frame(quad, side);
-    let side_length = a.distance(b);
+    let (_, outward) = side_frame(quad, side);
+    let straight = [a, b];
+    let line: &[Point] = path.unwrap_or(&straight);
+    let length = polyline_length(line);
     // The middle 90% of the side, every 1 px.
-    let start = 0.05 * side_length;
-    let count = ((0.9 * side_length).floor() as usize).saturating_add(1);
+    let start = 0.05 * length;
+    let count = ((0.9 * length).floor() as usize).saturating_add(1);
     let mut in_image = 0usize;
     let mut supported = 0usize;
     let mut at_border = 0usize;
     let mut deltas: Vec<f64> = Vec::with_capacity(count);
+    let mut walker = Walker::new(line);
     for i in 0..count {
-        let s = add(a, dir.scaled(start + i as f64));
+        let Some((s, tangent)) = walker.at(start + i as f64) else { break };
+        // The normal that points away from the page; a path's own direction changes along it.
+        let perpendicular = Point::new(tangent.y, -tangent.x);
+        let normal = if perpendicular.x * outward.x + perpendicular.y * outward.y >= 0.0 { perpendicular } else { perpendicular.scaled(-1.0) };
         if !inside_by(s, w, h) {
             continue;
         }
@@ -235,6 +281,41 @@ fn measure(quad: &Quad, side: Side, prepared: &Prepared, tau: f64) -> SideMeasur
     let border = in_image == 0 || (in_image as f64) < BORDER_SAMPLE_SHARE * count as f64 || at_border as f64 >= 0.7 * in_image as f64;
     let support = if border { BORDER_SUPPORT } else { supported as f64 / in_image as f64 };
     SideMeasure { support, border, contrast: median(&mut deltas) }
+}
+
+/// The length of a polyline.
+fn polyline_length(points: &[Point]) -> f64 {
+    points.windows(2).map(|w| w[0].distance(w[1])).sum()
+}
+
+/// Walks a polyline by arc length: the point at a distance from its start, and the unit direction
+/// of the segment it lies on. The distances asked for must not decrease.
+struct Walker<'a> {
+    points: &'a [Point],
+    /// The segment the walk is on, and the arc length at its start.
+    segment: usize,
+    before: f64,
+}
+
+impl<'a> Walker<'a> {
+    fn new(points: &'a [Point]) -> Self {
+        Self { points, segment: 0, before: 0.0 }
+    }
+
+    fn at(&mut self, distance: f64) -> Option<(Point, Point)> {
+        loop {
+            let (from, to) = (*self.points.get(self.segment)?, *self.points.get(self.segment + 1)?);
+            let length = from.distance(to);
+            if distance <= self.before + length || self.segment + 2 >= self.points.len() {
+                let along = if length > 0.0 { ((distance - self.before) / length).clamp(0.0, 1.0) } else { 0.0 };
+                let step = sub(to, from);
+                let direction = if length > 0.0 { Point::new(step.x / length, step.y / length) } else { Point::new(1.0, 0.0) };
+                return Some((add(from, step.scaled(along)), direction));
+            }
+            self.before += length;
+            self.segment += 1;
+        }
+    }
 }
 
 /// Whether a point lies at least 2 px from every border of the photo (A9 step 2).
@@ -304,6 +385,7 @@ struct Finalist {
     by: Detector,
     score: f64,
     refined: Refined,
+    sides: [SideShape; 4],
 }
 
 /// The factors that turn work-image pixels into photo pixels, one for each axis.
@@ -317,6 +399,18 @@ fn scaled(quad: &Quad, kx: f64, ky: f64) -> Quad {
     Quad(quad.0.map(|p| Point::new(p.x * kx, p.y * ky)))
 }
 
+/// A25 on a refined candidate. A trace that fails leaves the sides straight: the page is still
+/// found, and the user can bend its sides by hand.
+fn trace(refined: &Refined, work: &Quad, prepared: &Prepared, pyramid: &LumaPyramid) -> [SideShape; 4] {
+    let border = border_sides(work, prepared, TAU_AFTER);
+    crate::curved_sides::trace_sides(&refined.corners, &refined.polarity, pyramid, border, false).unwrap_or([
+        SideShape::Straight,
+        SideShape::Straight,
+        SideShape::Straight,
+        SideShape::Straight,
+    ])
+}
+
 /// Refines a candidate given in work-image pixels (A10), then scores the result again with
 /// τ = 2 (A9 step 6.2). A10 returns photo pixels, so the corners are brought back to the work
 /// image to be scored against its edges.
@@ -326,8 +420,10 @@ fn finalist(by: Detector, quad: &Quad, prepared: &Prepared, pyramid: &LumaPyrami
     };
     let refined = refine::refine(quad, pyramid, seed_for(seed, Step::A10, index as u64))?;
     let work = scaled(&refined.corners, 1.0 / kx, 1.0 / ky);
-    let score = score_prepared(&work, prepared, TAU_AFTER)?;
-    Ok(Finalist { by, score, refined })
+    // A25 traces the sides that aren't border sides, and a curved one is scored along its path.
+    let sides = trace(&refined, &work, prepared, pyramid);
+    let score = score_traced(&work, Some(Traces { sides: &sides, kx, ky }), prepared, TAU_AFTER)?;
+    Ok(Finalist { by, score, refined, sides })
 }
 
 /// A9 step 6: score the candidates, refine the best ones, and choose.
@@ -390,20 +486,27 @@ pub fn select(
     };
     let winner = if classical_wins { best_classical } else { apple_finalist };
     if let Some(f) = winner {
-        return Ok(Selection { by: Some(f.by), score: f.score, refined: f.refined });
+        return Ok(Selection { by: Some(f.by), score: f.score, refined: f.refined, sides: f.sides });
     }
     // Step 6.5: nothing was found, and the corners start 3% inside the photo's edges.
     let (kx, ky) = photo_scale(pyramid).unwrap_or((1.0, 1.0));
     let corners = scaled(&not_found_corners(prepared.width, prepared.height), kx, ky);
-    Ok(Selection { by: None, score: 0.0, refined: Refined { corners, unrefined: [true; 4], polarity: [crate::Polarity::PageLighter; 4] } })
+    let straight = [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight];
+    Ok(Selection {
+        by: None,
+        score: 0.0,
+        refined: Refined { corners, unrefined: [true; 4], polarity: [crate::Polarity::PageLighter; 4] },
+        sides: straight,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Prepared, area_share, is_valid, measure, not_found_corners, score, score_prepared};
+    use super::{Prepared, TAU_AFTER, Traces, area_share, is_valid, measure, not_found_corners, score, score_prepared, score_traced, trace};
     use crate::edges::colour_edges;
     use scancraft_core::geom::{Point, Quad};
     use scancraft_core::image::{Plane, RgbF32};
+    use scancraft_core::recipe::SideShape;
 
     fn work(w: u32, h: u32, f: impl Fn(f64, f64) -> [f32; 3]) -> RgbF32 {
         let mut px: Vec<[f32; 3]> = Vec::with_capacity(w as usize * h as usize);
@@ -482,9 +585,61 @@ mod tests {
         // The page fills the photo, so all four sides are at the frame.
         let page = Quad([Point::new(-50.0, -50.0), Point::new(450.0, -50.0), Point::new(450.0, 350.0), Point::new(-50.0, 350.0)]);
         for side in scancraft_core::geom::Side::ALL {
-            let m = measure(&page, side, &prepared, 3.0);
+            let m = measure(&page, side, &prepared, 3.0, None);
             assert!(m.border, "{side:?} should be a border side");
             assert!((m.support - 0.35).abs() < 1e-12);
         }
+    }
+
+    /// A page whose top and bottom edges bow outwards by `bow` pixels, on a darker desk: the photo
+    /// as colours for the edge maps and as luma for the pyramid.
+    fn bowed_page(w: u32, h: u32, bow: f64) -> (RgbF32, scancraft_core::pyramid::LumaPyramid) {
+        let value = |x: f64, y: f64| {
+            let t = ((x - 150.0) / 700.0).clamp(0.0, 1.0);
+            let lift = bow * 4.0 * t * (1.0 - t);
+            let inside = (y - (150.0 - lift)).min((600.0 + lift) - y).min(x - 150.0).min(850.0 - x);
+            0.18 + 0.74 * (inside + 0.5).clamp(0.0, 1.0)
+        };
+        let img = work(w, h, |x, y| [value(x, y) as f32; 3]);
+        let luma = Plane::from_vec(
+            w,
+            h,
+            (0..h).flat_map(|j| (0..w).map(move |i| (i, j))).map(|(i, j)| value(f64::from(i) + 0.5, f64::from(j) + 0.5) as f32).collect(),
+        )
+        .unwrap();
+        (img, crate::refine::build_pyramid(&luma).unwrap())
+    }
+
+    #[test]
+    fn a_bent_page_scores_better_along_its_traced_edges_than_along_straight_chords() {
+        // A9 step 6.2: the bend of the top and bottom edges is 6% of their length.
+        let (img, pyramid) = bowed_page(1000, 750, 42.0);
+        let prepared = Prepared::new(colour_edges(&img).unwrap()).unwrap();
+        let corners = Quad([Point::new(150.0, 150.0), Point::new(850.0, 150.0), Point::new(850.0, 600.0), Point::new(150.0, 600.0)]);
+        let refined = crate::refine::refine(&corners, &pyramid, 1).unwrap();
+        let sides = trace(&refined, &refined.corners, &prepared, &pyramid);
+        for side in [scancraft_core::geom::Side::Top, scancraft_core::geom::Side::Bottom] {
+            assert!(
+                matches!(sides[side.index()], SideShape::Traced { curved: true, .. }),
+                "{side:?} was not traced as curved: {:?}",
+                sides[side.index()]
+            );
+        }
+        let straight = score_prepared(&refined.corners, &prepared, TAU_AFTER).unwrap();
+        let along = score_traced(&refined.corners, Some(Traces { sides: &sides, kx: 1.0, ky: 1.0 }), &prepared, TAU_AFTER).unwrap();
+        assert!(along > 1.2 * straight, "scored along its edges {along}, along straight chords {straight}");
+    }
+
+    #[test]
+    fn a_flat_page_scores_the_same_whether_its_sides_are_traced_or_not() {
+        let (img, pyramid) = bowed_page(1000, 750, 0.0);
+        let prepared = Prepared::new(colour_edges(&img).unwrap()).unwrap();
+        let corners = Quad([Point::new(150.0, 150.0), Point::new(850.0, 150.0), Point::new(850.0, 600.0), Point::new(150.0, 600.0)]);
+        let refined = crate::refine::refine(&corners, &pyramid, 1).unwrap();
+        let sides = trace(&refined, &refined.corners, &prepared, &pyramid);
+        assert!(sides.iter().all(|s| !matches!(s, SideShape::Traced { curved: true, .. })), "{sides:?}");
+        let straight = score_prepared(&refined.corners, &prepared, TAU_AFTER).unwrap();
+        let along = score_traced(&refined.corners, Some(Traces { sides: &sides, kx: 1.0, ky: 1.0 }), &prepared, TAU_AFTER).unwrap();
+        assert!((along - straight).abs() < 1e-12, "{along} against {straight}");
     }
 }

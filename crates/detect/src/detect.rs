@@ -83,10 +83,5 @@ pub fn detect_page(photo: &Rgb8, apple: Option<&dyn PageDetector>, seed: u64) ->
         Some(by) => CornerOrigin::Detected { by, score: selection.score as f32 },
         None => CornerOrigin::NotFound,
     };
-    Ok(Detection {
-        refined: selection.refined,
-        origin,
-        sides: [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight],
-        pyramid,
-    })
+    Ok(Detection { refined: selection.refined, origin, sides: selection.sides, pyramid })
 }

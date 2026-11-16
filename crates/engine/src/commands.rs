@@ -7,8 +7,7 @@
 
 use crate::crop::{clamp_corner, full_image_corners, invalid_reason, move_side};
 use crate::error::EngineError;
-use crate::flatten::{FlattenInput, decide};
-use crate::pipeline::{page_geometry, unfinished_note};
+use crate::pipeline::page_geometry;
 use crate::session::{self, MAX_PAGES, Session};
 use crate::undo::UndoStep;
 use crate::{Engine, KEEP_SESSIONS, PhotoStatus, Target};
@@ -591,7 +590,7 @@ impl Engine {
         }
         let pdf = matches!(item.origin, ImportOrigin::PdfPage { .. });
         let look = self.last_look;
-        let mut notes = Vec::new();
+        let mut to_flatten = Vec::new();
         for (id, proportions, size_mm) in computed {
             let Some(page) = self.session.page_mut(id) else { continue };
             page.proportions = Some(proportions);
@@ -600,32 +599,15 @@ impl Engine {
             page.look = look;
             page.strength = look.default_strength().unwrap_or(0);
             if page.flatten != FlattenMode::Off && !pdf && !matches!(page.corners_from, CornerOrigin::FullImage) {
-                // A29 decides from the fits of A27, which WP11 puts in place; until then a page that asked for
-                // flattening says so and goes on with the straight-sided correction.
-                let diagonal = page.corners.0[0].distance(page.corners.0[2]);
-                let input = FlattenInput {
-                    mode: page.flatten,
-                    plane: None,
-                    curved: None,
-                    sides: &page.sides,
-                    lines_corners: None,
-                    lines_flat: None,
-                    diagonal_px: diagonal,
-                    unavailable: false,
-                };
-                if let Err(e) = decide(&input) {
-                    let asked = page.flatten == FlattenMode::On || page.sides.iter().any(|s| matches!(s, SideShape::Bent { .. }));
-                    if asked {
-                        notes.push(match EngineError::from(e).unfinished_step() {
-                            Some(step) => unfinished_note(step),
-                            None => "Couldn't flatten the curve. The page was straightened by its corners instead.".to_string(),
-                        });
-                    }
-                }
+                // A29 decides in the background, once the page is on screen: the fit and the two
+                // straightenings take a moment, and the page shows with its corners meanwhile.
+                to_flatten.push(id);
             }
         }
-        for n in notes {
-            self.notify(n, false);
+        for id in to_flatten {
+            if let Some(page) = self.session.page(id).cloned() {
+                self.submit_flatten(&page);
+            }
         }
         // Spreads open in reading order (§4.4).
         let order = self.settings.get().book_page_order;

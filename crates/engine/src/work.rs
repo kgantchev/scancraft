@@ -2,6 +2,7 @@
 
 use crate::cache::{CacheKind, cache_key, display_key};
 use crate::error::EngineError;
+use crate::flatten::{COULD_NOT_FLATTEN, FlattenResult, flatten_page};
 use crate::jobs::{CancellationToken, Job, JobDone, JobMeta, JobPriority};
 use crate::pipeline::{
     Ctx, DetectedPhoto, ExportReport, FILTER_THUMB_LONG_SIDE, PREVIEW_LONG_SIDE, TRAY_THUMB_LONG_SIDE, crop_square, detect_photo, display_copy,
@@ -24,6 +25,7 @@ pub(crate) enum JobOutput {
     Image { key: ImageKey, cache_key: String, image: Arc<Rgb8>, notes: Vec<String> },
     Text { page: PageId, for_key: String, text: Option<RecognizedText> },
     Upright { page: PageId, for_key: String, turns: Option<u8>, notes: Vec<String> },
+    Flatten { page: PageId, for_key: String, result: Box<FlattenResult> },
     Exported { report: ExportReport, path: PathBuf },
     Decoded,
 }
@@ -48,6 +50,12 @@ pub(crate) fn tag_of(parts: &[&str]) -> u64 {
 /// The key a page's recognised text was made for: the page as it is rendered at 300 DPI.
 pub(crate) fn text_key(page: &Page) -> String {
     cache_key(page, 300, CacheKind::FinalPage)
+}
+
+/// What A29's decision was made from: the page's outline, its sides and its Flatten setting. A
+/// decision made for another outline is dropped when it comes back.
+pub(crate) fn flatten_key(page: &Page) -> String {
+    format!("{:?}|{:?}|{:?}|{:?}", page.photo, page.corners, page.sides, page.flatten)
 }
 
 impl Engine {
@@ -242,6 +250,38 @@ impl Engine {
         );
     }
 
+    /// A29 for a page, in the background: the evidence, the sheet fit and the check on the
+    /// straightened page. The page is shown by its corners until the answer comes back.
+    pub(crate) fn submit_flatten(&mut self, page: &Page) {
+        let Some(item) = self.session.photo(page.photo).cloned() else { return };
+        let token = self.fresh_token(Target::Flatten(page.id));
+        let ctx = self.ctx();
+        let page = page.clone();
+        let for_key = flatten_key(&page);
+        let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["flatten", &for_key]), ..JobMeta::default() };
+        let id = page.id;
+        self.submit_job(
+            JobPriority::Preview,
+            token,
+            meta,
+            Box::new(move |token| {
+                let loaded = load_photo(&ctx, &item.source, &item.origin, token)?;
+                let size = (loaded.image.width(), loaded.image.height());
+                let focal = loaded.focal.unwrap_or(item.focal);
+                let result =
+                    page_geometry(&page, size, focal, &ctx.settings).and_then(|geometry| flatten_page(&loaded.image, &page, &geometry, token));
+                let result = match result {
+                    Ok(result) => result,
+                    Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                    // A fit that can't be made leaves the page as the corners straighten it. Only a
+                    // page that asked for flattening is told.
+                    Err(_) => FlattenResult { fit: None, note: (page.flatten == FlattenMode::On).then(|| COULD_NOT_FLATTEN.to_owned()) },
+                };
+                Ok(JobOutput::Flatten { page: id, for_key, result: Box::new(result) })
+            }),
+        );
+    }
+
     /// Renders every tray page at the output density and writes the PDF, in a job.
     pub(crate) fn submit_export(&mut self, path: PathBuf) {
         let file = self.session.file();
@@ -374,6 +414,20 @@ impl Engine {
                     p.text = None;
                     self.mark_dirty();
                 }
+                true
+            }
+            JobOutput::Flatten { page, for_key, result } => {
+                let FlattenResult { fit, note } = *result;
+                if let Some(note) = note {
+                    self.notify(note, false);
+                }
+                let Some(p) = self.session.page_mut(page) else { return false };
+                // A decision made for an older outline or setting is dropped.
+                if flatten_key(p) != for_key || p.sheet == fit {
+                    return false;
+                }
+                p.sheet = fit;
+                self.mark_dirty();
                 true
             }
             JobOutput::Exported { report, path } => self.export_finished(report, path),
