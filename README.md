@@ -4,8 +4,7 @@ A macOS app, in Rust, that turns photos of paper documents into clean, searchabl
 each page's edges, flattens the page (perspective, and curl when the page is bent), evens out its
 light, reads its text and writes one PDF.
 
-- What it does and how: [`ScanCraft Application Specification.md`](ScanCraft%20Application%20Specification.md)
-- How it's being built, in parallel work packages: [`ScanCraft Build Plan.md`](ScanCraft%20Build%20Plan.md)
+- What it does and how, and how it is being built in parallel work packages: the ScanCraft Application Specification and Build Plan, which are kept outside this repository, in the project notes
 - Rules for contributors and agents: [`AGENTS.md`](AGENTS.md)
 
 ```text

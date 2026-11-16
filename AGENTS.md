@@ -56,8 +56,8 @@ Dependencies and assets use SPDX identifiers. An expression is allowed when ever
 ScanCraft is a macOS app, in Rust, that turns photos of paper documents into clean, searchable PDFs. It finds each page's edges, flattens it (perspective, and curl when the page is bent), evens out its light, reads its text and writes one PDF. The command-line tool runs the same engine on Linux.
 
 ## Start every session here
-- [`ScanCraft Application Specification.md`](ScanCraft%20Application%20Specification.md) says what to build and how, algorithm by algorithm (A1–A30), with each algorithm's tests.
-- [`ScanCraft Build Plan.md`](ScanCraft%20Build%20Plan.md) splits the work into packages WP0–WP14 and says which files each one owns. Work only on your package's files (plan §2).
+- The ScanCraft Application Specification (kept outside this repository, in the project notes) says what to build and how, algorithm by algorithm (A1–A30), with each algorithm's tests.
+- The ScanCraft Build Plan (kept with it) splits the work into packages WP0–WP14 and says which files each one owns. Work only on your package's files (plan §2).
 
 ## Never crash
 - No `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or `unimplemented!` outside tests. Production crate roots carry `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`; new crates start with it. Tests may `unwrap` (`clippy.toml`).

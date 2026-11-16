@@ -3,6 +3,7 @@
 
 mod fixtures;
 mod layers;
+mod secrets;
 
 use std::process::{Command, ExitCode};
 
@@ -12,6 +13,7 @@ commands:
   ci [-p PACKAGE]   fmt check, clippy -D warnings, tests and the layer check; with -p, one
                     package's fmt, clippy and tests (what a work package runs before its PR)
   layers            check the crate layering (specification §6.1)
+  secrets           gitleaks over the working tree and the whole history (house rule 10)
   fixtures          redraw fixtures/ (build plan WP0 step 7)";
 
 fn main() -> ExitCode {
@@ -23,6 +25,7 @@ fn main() -> ExitCode {
             _ => Err(USAGE.to_string()),
         },
         Some("layers") => layers::run(),
+        Some("secrets") => secrets::run(),
         Some("fixtures") => fixtures::run(),
         _ => Err(USAGE.to_string()),
     };
@@ -46,7 +49,19 @@ fn ci_all() -> Result<(), String> {
     cargo(&["fmt", "--all", "--check"])?;
     cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
     cargo(&["test", "--workspace", "--no-fail-fast"])?;
-    layers::run()
+    layers::run()?;
+    secrets_if_installed()
+}
+
+/// The secret scan runs wherever gitleaks is installed. The shared CI runners may not have it, and
+/// the gate there must not fail for that; the warning says so instead of passing silently.
+fn secrets_if_installed() -> Result<(), String> {
+    if secrets::available() {
+        secrets::run()
+    } else {
+        eprintln!("warning: gitleaks is not installed, so the secret scan was skipped (`cargo xtask secrets`)");
+        Ok(())
+    }
 }
 
 fn ci_package(package: &str) -> Result<(), String> {
