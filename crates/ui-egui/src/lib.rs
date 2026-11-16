@@ -16,11 +16,13 @@ pub mod import;
 pub mod loupe;
 pub mod menu;
 pub mod state;
+pub mod stepper;
 pub mod text;
 pub mod theme;
+pub mod tools;
 pub mod tray;
 
-use scancraft_core::engine_api::{EngineApi, Notice, Screen, ViewState};
+use scancraft_core::engine_api::{EngineApi, Notice, ViewState};
 
 pub use fake_engine::FakeEngine;
 pub use menu::{build_menu_bar, menu_state};
@@ -41,20 +43,41 @@ impl ScanCraftUi {
     pub fn ui(&mut self, ui: &mut egui::Ui, engine: &mut dyn EngineApi) {
         self.apply_theme(ui.ctx());
         let view = engine.view();
+        stepper::track_work(&mut self.state, &view);
+        let stage = stepper::current_stage(&self.state, &view);
         let show_tray = !view.tray.is_empty() && !self.state.tray_hidden;
+        // The stage bar, along the top: where the user is in the scan, and a way to any stage.
+        egui::Panel::top("scancraft.stages").exact_size(stepper::STAGE_BAR_HEIGHT).resizable(false).show_separator_line(true).frame(egui::Frame::NONE).show(ui, |ui| {
+            stepper::stage_bar(ui, &mut self.state, &view, engine);
+        });
         // The tray's bar, along the bottom of the window (§4.5).
         if show_tray {
             egui::Panel::bottom("scancraft.tray").exact_size(tray::BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
                 tray::page_tray(ui, &mut self.state, &view, engine);
             });
         }
+        // The step bar, above the tray: the buttons that move on or back.
+        egui::Panel::bottom("scancraft.steps").exact_size(stepper::STEP_BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
+            stepper::step_bar(ui, &mut self.state, &view, engine);
+        });
+        // The tools, on the left: everything that changes the picture.
+        if matches!(stage, stepper::Stage::Crop | stepper::Stage::Enhance) {
+            let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(12));
+            egui::Panel::left("scancraft.tools").exact_size(tools::PANEL_WIDTH).resizable(false).show_separator_line(true).frame(frame).show(ui, |ui| {
+                if stage == stepper::Stage::Crop {
+                    tools::crop_tools(ui, &mut self.state, &view, engine);
+                } else {
+                    tools::enhance_tools(ui, &mut self.state, &view, engine);
+                }
+            });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             self.notice_strip(ui, &view);
-            match view.screen {
-                Screen::Import => import::import_screen(ui, &mut self.state, &view, engine),
-                Screen::Crop(_) => crop::crop_screen(ui, &mut self.state, &view, engine),
-                Screen::Enhance(_) => enhance::enhance_screen(ui, &mut self.state, &view, engine),
-                Screen::Export => self.export_screen(ui),
+            match stage {
+                stepper::Stage::Import => import::import_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Crop => crop::crop_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Enhance => enhance::enhance_screen(ui, &mut self.state, &view, engine),
+                stepper::Stage::Export => self.export_screen(ui),
             }
         });
         // The windows that float above the screens.

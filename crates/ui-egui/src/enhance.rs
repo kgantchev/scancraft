@@ -28,51 +28,15 @@ pub fn look_name(look: Look) -> &'static str {
     }
 }
 
-/// Draws Screen 3.
+/// Draws Screen 3: the page. Its tools are in the tools panel and its buttons in the step bar.
 pub fn enhance_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     if view.enhance.is_none() {
         return;
     }
-    enhance_toolbar(ui, state, view, engine);
     let area = ui.available_rect_before_wrap();
-    // The filter strip and the slider have their room below the page.
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(area.width(), (area.height() - STRIP_HEIGHT).max(120.0)), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click());
     page_canvas(ui, state, view, rect, response.is_pointer_button_down_on(), engine);
-    notes(ui, state, view, engine);
-    filter_strip(ui, state, view, engine);
-    strength_slider(ui, state, view, engine);
     keyboard(ui, state, view, engine);
-}
-
-/// The toolbar above the canvas (§4.4).
-fn enhance_toolbar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    let Some(enhance) = view.enhance.as_ref() else {
-        return;
-    };
-    let page = enhance.page;
-    ui.horizontal_wrapped(|ui| {
-        let rotate_left = state.text.t("Rotate Left");
-        if ui.button(rotate_left).clicked() {
-            canvas::dispatch(state, engine, Command::PageRotate { page, quarter_turns: -1 });
-        }
-        let rotate_right = state.text.t("Rotate Right");
-        if ui.button(rotate_right).clicked() {
-            canvas::dispatch(state, engine, Command::PageRotate { page, quarter_turns: 1 });
-        }
-        let back = state.text.t("Back to Crop");
-        if ui.button(back).clicked() {
-            canvas::dispatch(state, engine, Command::PageOpenCrop { page });
-        }
-        let add = state.text.t(if enhance.more_to_come { "Add Page & Next" } else { "Add Page" });
-        if ui.button(add).clicked() {
-            canvas::dispatch(state, engine, Command::PageAdd { page });
-        }
-        let export = state.text.t("Export to PDF");
-        if ui.button(export).clicked() {
-            let options = state.export_options.clone();
-            state.actions.push(crate::state::UiAction::ExportPdf { options });
-        }
-    });
 }
 
 /// The page canvas: the flattened page, and the Original look while the page is held down
@@ -159,7 +123,7 @@ pub fn strength_slider(ui: &mut Ui, state: &mut UiState, view: &ViewState, engin
 }
 
 /// The notes the engine gives about the page (§4.4).
-fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else {
         return;
     };
@@ -197,7 +161,7 @@ fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn En
 }
 
 /// Applies the look of the filter strip's selection (§4.4).
-fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, index: usize) {
+pub fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, index: usize) {
     let Some(enhance) = view.enhance.as_ref() else { return };
     let Some(look) = LOOKS.get(index).copied() else { return };
     state.filter_index = index;

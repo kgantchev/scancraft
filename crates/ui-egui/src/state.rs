@@ -197,6 +197,10 @@ pub struct UiState {
     pub actions: Vec<UiAction>,
     /// The theme the palette was last applied for.
     pub theme: Option<egui::Theme>,
+    /// The Import stage is shown above the stage the engine is at, to add more files.
+    pub show_import: bool,
+    /// How much work the last frame had (photos, tray pages), to tell when files were added.
+    pub work_seen: (usize, usize),
 }
 
 /// How many messages the strip keeps; the oldest goes when there are more.
@@ -230,6 +234,8 @@ impl UiState {
             loupe_texture: None,
             actions: Vec::new(),
             theme: None,
+            show_import: false,
+            work_seen: (0, 0),
         }
     }
 
