@@ -175,6 +175,22 @@ pub enum UiAction {
     SettingsChanged(Settings),
     /// Open the folder panel for the reference set the labels are written to (§10.2).
     ChooseLabelFolder,
+    /// Show a file in the Finder.
+    RevealInFinder { path: String },
+    /// Open a file with the program the system has for it.
+    OpenFile { path: String },
+}
+
+/// The sheet over the window while a PDF is being written, and after it has been.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ExportSheet {
+    /// No sheet.
+    #[default]
+    Closed,
+    /// The PDF is being written: the progress, and Cancel.
+    Running,
+    /// The PDF was written: where it is, how big, and what to do with it.
+    Finished(scancraft_core::engine_api::ExportSummary),
 }
 
 /// Everything the interface remembers between frames.
@@ -203,8 +219,18 @@ pub struct UiState {
     pub enhance_canvas_of: Option<PageId>,
     /// The filter strip's selection: 0 is Original, 3 is Color Document.
     pub filter_index: usize,
-    /// The page tray is hidden (⌥⌘T).
-    pub tray_hidden: bool,
+    /// The pages sidebar is hidden (⌥⌘T).
+    pub sidebar_hidden: bool,
+    /// The inspector is hidden (⌥⌘I).
+    pub inspector_hidden: bool,
+    /// Show Original is held, by the button or the \ key: the page shows with no filter on it.
+    pub show_original: bool,
+    /// The toolbar's overflow menu is open.
+    pub toolbar_more: bool,
+    /// The sheet over the window for the export.
+    pub export_sheet: ExportSheet,
+    /// The last export's summary the sheet has shown, so a new one is told from an old one.
+    pub summary_seen: Option<scancraft_core::engine_api::ExportSummary>,
     /// The export options popover is open.
     pub export_popover: bool,
     /// The Settings window is open.
@@ -240,13 +266,6 @@ pub struct UiState {
     pub actions: Vec<UiAction>,
     /// The theme the palette was last applied for.
     pub theme: Option<egui::Theme>,
-    /// The Import stage is shown above the stage the engine is at, to add more files.
-    pub show_import: bool,
-    /// Export was asked for while photos were still waiting: how many, and how many pages are
-    /// added. The question "Export the added pages?" is showing.
-    pub confirm_export: Option<(usize, usize)>,
-    /// How much work the last frame had (photos, tray pages), to tell when files were added.
-    pub work_seen: (usize, usize),
 }
 
 /// How many messages are kept at once; the oldest goes when there are more.
@@ -306,7 +325,12 @@ impl UiState {
             enhance_canvas_view: CanvasView::default(),
             enhance_canvas_of: None,
             filter_index: 3,
-            tray_hidden: false,
+            sidebar_hidden: false,
+            inspector_hidden: false,
+            show_original: false,
+            toolbar_more: false,
+            export_sheet: ExportSheet::Closed,
+            summary_seen: None,
             export_popover: false,
             settings_open: false,
             about_open: false,
@@ -324,9 +348,6 @@ impl UiState {
             loupe_texture: None,
             actions: Vec::new(),
             theme: None,
-            show_import: false,
-            confirm_export: None,
-            work_seen: (0, 0),
         }
     }
 
@@ -373,17 +394,6 @@ impl UiState {
         let handle = ui.ctx().load_texture(format!("scancraft-{key:?}"), color_image(&image), options);
         self.textures.insert(key, Texture { image, handle: handle.clone() });
         Some(handle)
-    }
-
-    /// Asks the shell for the Save panel, after asking whether to export when photos are still
-    /// waiting to be added (§4.8).
-    pub fn request_export(&mut self, view: &scancraft_core::engine_api::ViewState) {
-        let waiting = view.crop.as_ref().map_or(0, |crop| crop.photos.iter().filter(|tab| !tab.added).count());
-        if waiting > 0 && !view.tray.is_empty() {
-            self.confirm_export = Some((waiting, view.tray.len()));
-            return;
-        }
-        self.start_export();
     }
 
     /// Asks the shell for the Save panel.
@@ -442,7 +452,7 @@ impl std::fmt::Debug for UiState {
         f.debug_struct("UiState")
             .field("selection", &self.selection)
             .field("filter_index", &self.filter_index)
-            .field("tray_hidden", &self.tray_hidden)
+            .field("sidebar_hidden", &self.sidebar_hidden)
             .field("export_options", &self.export_options)
             .field("settings", &self.settings)
             .finish_non_exhaustive()

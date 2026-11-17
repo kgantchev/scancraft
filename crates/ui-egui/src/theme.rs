@@ -5,7 +5,7 @@
 //! values of the specification map straight across.
 
 use craft_ui::theme::WidgetPalette;
-use egui::{Color32, Context, CornerRadius, Stroke, Ui, Vec2};
+use egui::{Color32, Context, CornerRadius, Pos2, Rect, Stroke, Ui, Vec2};
 
 /// Copper `#A84128`: the primary buttons.
 pub const COPPER: Color32 = Color32::from_rgb(0xA8, 0x41, 0x28);
@@ -102,17 +102,85 @@ pub fn canvas_background(ui: &Ui, rect: egui::Rect) {
     ui.painter().rect_filled(rect, 0.0, CANVAS_BACKGROUND);
 }
 
-/// The style of the icon-only buttons: Copper, with the focus ring in Scan Cyan.
-pub fn icon_button_style() -> craft_ui::buttons::IconButtonStyle {
-    let fill = Stroke::new(1.0, Color32::TRANSPARENT);
+/// The amber of the dot that marks a page whose edges need a look.
+pub const NEEDS_LOOK: Color32 = Color32::from_rgb(0xF2, 0xA1, 0x2E);
+
+/// The style of the toolbar's icon buttons: neutral, in the window's own colours. Copper is for the
+/// one primary button of a view, so an icon button is never copper; the keyboard's focus ring is
+/// the accent colour.
+pub fn icon_button_style(dark: bool) -> craft_ui::buttons::IconButtonStyle {
+    let (rest, hover, pressed) = neutral_fills(dark);
+    let ink = if dark { Color32::from_rgb(0xE6, 0xE6, 0xE8) } else { Color32::from_rgb(0x2A, 0x2A, 0x2E) };
+    let none = Stroke::new(1.0, Color32::TRANSPARENT);
+    let visuals = |fill: Color32| craft_ui::buttons::ButtonVisuals { fill, stroke: none, icon: ink };
     craft_ui::buttons::IconButtonStyle {
-        normal: craft_ui::buttons::ButtonVisuals { fill: COPPER, stroke: fill, icon: Color32::WHITE },
-        hovered: craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE },
-        pressed: Some(craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE }),
-        selected: craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE },
+        normal: visuals(Color32::TRANSPARENT),
+        hovered: visuals(hover),
+        pressed: Some(visuals(pressed)),
+        // A selected button (the mode that is on) is the resting neutral fill, held down.
+        selected: visuals(rest),
         corner_radius: CornerRadius::same(6),
-        focus_stroke: Stroke::new(2.0, SCAN_CYAN),
+        focus_stroke: Stroke::new(2.0, accent(dark)),
     }
+}
+
+/// The primary button of a toolbar: copper, with white text, `height` points tall. It is the one
+/// copper button of the window, so it is used once.
+pub fn primary_button(ui: &mut Ui, label: &str, enabled: bool, height: f32) -> egui::Response {
+    let font = egui::FontId::proportional(14.0);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x + 28.0, height), egui::Sense::click());
+    let hovered = enabled && response.hovered();
+    let alpha = if enabled { 1.0 } else { 0.4 };
+    let fill = if hovered { LIGHT_COPPER } else { COPPER };
+    let painter = ui.painter_at(rect.expand(2.0));
+    painter.rect_filled(rect, 6.0, fill.gamma_multiply(alpha));
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, Color32::WHITE.gamma_multiply(alpha));
+    painter.galley(Pos2::new(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+    if response.has_focus() {
+        painter.rect_stroke(rect.shrink(2.0), 5.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Inside);
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
+}
+
+/// Two buttons side by side, one of them on: a switch between two views. Returns which one the
+/// user clicked, if any. Each is a button of its own for a screen reader, selected or not.
+pub fn segmented(ui: &mut Ui, labels: [&str; 2], on: usize, enabled: [bool; 2]) -> Option<usize> {
+    let dark = ui.visuals().dark_mode;
+    let (rest, hover, _) = neutral_fills(dark);
+    let ink = ui.visuals().text_color();
+    let font = egui::FontId::proportional(14.0);
+    let widths: Vec<f32> = labels.iter().map(|l| ui.painter().layout_no_wrap((*l).to_owned(), font.clone(), ink).size().x + 24.0).collect();
+    let height = 28.0;
+    let total = Vec2::new(widths[0] + widths[1], height);
+    let (outer, _) = ui.allocate_exact_size(total, egui::Sense::hover());
+    ui.painter().rect_filled(outer, 7.0, rest);
+    let mut clicked = None;
+    let mut x = outer.min.x;
+    for (index, label) in labels.iter().enumerate() {
+        let cell = Rect::from_min_size(Pos2::new(x, outer.min.y), Vec2::new(widths[index], height));
+        x += widths[index];
+        let id = ui.make_persistent_id(("scancraft.segment", index));
+        let response = ui.interact(cell, id, egui::Sense::click());
+        let selected = index == on;
+        if selected {
+            let fill = if dark { Color32::from_rgb(0x5E, 0x5E, 0x64) } else { Color32::WHITE };
+            ui.painter().rect_filled(cell.shrink(2.0), 5.0, fill);
+        } else if response.hovered() && enabled[index] {
+            ui.painter().rect_filled(cell.shrink(2.0), 5.0, hover);
+        }
+        let colour = if enabled[index] { ink } else { ink.gamma_multiply(0.4) };
+        ui.painter().text(cell.center(), egui::Align2::CENTER_CENTER, *label, font.clone(), colour);
+        if response.has_focus() {
+            ui.painter().rect_stroke(cell.shrink(2.0), 5.0, Stroke::new(2.0, accent(dark)), egui::StrokeKind::Inside);
+        }
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled[index], selected, *label));
+        if response.clicked() && enabled[index] {
+            clicked = Some(index);
+        }
+    }
+    clicked
 }
 
 /// Which way an arrow points.

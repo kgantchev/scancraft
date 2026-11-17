@@ -4063,6 +4063,8 @@ dependencies = [
  "craft-settings",
  "eframe",
  "egui",
+ "egui_kittest",
+ "image",
  "scancraft-apple",
  "scancraft-core",
  "scancraft-engine",

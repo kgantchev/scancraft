@@ -87,6 +87,79 @@ pub fn export_options_popover(ui: &mut Ui, state: &mut UiState) {
     }
 }
 
+/// A file's size for people: "812 KB", "3.4 MB".
+pub fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1000.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} bytes")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    }
+}
+
+/// The last part of a path, for the sheet that names the file.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_owned()
+}
+
+/// The sheet over the window for the export: while the PDF is written, how far along it is by page
+/// and a Cancel; once it is written, its name, its pages and its size, and what to do with it.
+pub fn export_sheet(ctx: &egui::Context, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+    match state.export_sheet.clone() {
+        crate::state::ExportSheet::Closed => {}
+        crate::state::ExportSheet::Running => {
+            let title = state.text.t("Exporting PDF");
+            egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_width(300.0);
+                let (done, total) = view.exporting.map_or((0, 1), |p| (p.done, p.total.max(1)));
+                let text = state.text.t("{done} of {total} pages").replace("{done}", &done.to_string()).replace("{total}", &total.to_string());
+                // The words are a label, so a screen reader has them; the bar is the picture of them.
+                ui.label(text);
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32));
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button(state.text.t("Cancel")).clicked() {
+                        crate::canvas::dispatch(state, engine, scancraft_core::command::Command::ExportCancel);
+                    }
+                });
+            });
+        }
+        crate::state::ExportSheet::Finished(summary) => {
+            let title = state.text.t("PDF exported");
+            egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label(egui::RichText::new(file_name(&summary.path)).strong());
+                let pages = state.text.trn(u64::from(summary.pages), "{n} page", "{n} pages");
+                ui.label(format!("{pages} · {}", human_size(summary.bytes)));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button(state.text.t("Show in Finder")).clicked() {
+                        state.actions.push(crate::state::UiAction::RevealInFinder { path: summary.path.clone() });
+                    }
+                    if ui.button(state.text.t("Open")).clicked() {
+                        state.actions.push(crate::state::UiAction::OpenFile { path: summary.path.clone() });
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(state.text.t("New Scan")).clicked() {
+                        crate::canvas::dispatch(state, engine, scancraft_core::command::Command::SessionNew);
+                        state.export_sheet = crate::state::ExportSheet::Closed;
+                    }
+                    if ui.button(state.text.t("Done")).clicked() {
+                        state.export_sheet = crate::state::ExportSheet::Closed;
+                    }
+                });
+            });
+        }
+    }
+}
+
 /// The Settings window (§4.6).
 pub fn settings_window(ctx: &egui::Context, state: &mut UiState) {
     let mut open = state.settings_open;

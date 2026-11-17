@@ -54,27 +54,31 @@ pub struct Canvas {
 }
 
 impl Canvas {
-    /// Fits the display copy into `area` with [`PADDING`] points of padding.
+    /// Fits the display copy into `area` with [`PADDING`] points of padding, and room for a
+    /// corner to leave the photo.
     pub fn new(area: Rect, display: &Rgb8, photo_size: (u32, u32)) -> Canvas {
-        Canvas::with_view(area, display, photo_size, CanvasView::default())
+        Canvas::with_view(area, display, photo_size, CanvasView::default(), VIRTUAL_MARGIN)
     }
 
-    /// The display copy in `area`, zoomed and panned by `view`.
-    pub fn with_view(area: Rect, display: &Rgb8, photo_size: (u32, u32), view: CanvasView) -> Canvas {
+    /// The display copy in `area`, zoomed and panned by `view`, with `margin` of the photo's size
+    /// kept free around it for a corner that has left the photo. The margin is 0 while every
+    /// corner is on the photo, so the photo is as large as the area allows, and
+    /// [`VIRTUAL_MARGIN`] while one is not.
+    pub fn with_view(area: Rect, display: &Rgb8, photo_size: (u32, u32), view: CanvasView, margin: f32) -> Canvas {
+        let margin = if margin.is_finite() { margin.clamp(0.0, VIRTUAL_MARGIN) } else { 0.0 };
         let dw = display.width() as f32;
         let dh = display.height() as f32;
         let inner = area.shrink(PADDING);
         let zoom = if view.zoom.is_finite() { view.zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { MIN_ZOOM };
         let (mut scale, mut shown) = (0.0, Vec2::ZERO);
         if dw > 0.0 && dh > 0.0 && inner.width() > 0.0 && inner.height() > 0.0 {
-            // The margin is part of the fit, so the photo keeps its size while a corner leaves it.
-            let wide = 1.0 + 2.0 * VIRTUAL_MARGIN;
+            let wide = 1.0 + 2.0 * margin;
             scale = (inner.width() / (dw * wide)).min(inner.height() / (dh * wide)) * zoom;
             shown = Vec2::new(dw * scale, dh * scale);
         }
         // The pan may take the margin's edge to the padded area's edge and no further, so the photo
         // cannot be lost off the canvas.
-        let workspace_size = shown * (1.0 + 2.0 * VIRTUAL_MARGIN);
+        let workspace_size = shown * (1.0 + 2.0 * margin);
         let slack = ((workspace_size - inner.size()) / 2.0).max(Vec2::ZERO);
         let pan = if view.pan.x.is_finite() && view.pan.y.is_finite() {
             Vec2::new(view.pan.x.clamp(-slack.x, slack.x), view.pan.y.clamp(-slack.y, slack.y))
@@ -82,7 +86,7 @@ impl Canvas {
             Vec2::ZERO
         };
         let rect = Rect::from_center_size(inner.center() + pan, shown);
-        let workspace = rect.expand2(Vec2::new(rect.width() * VIRTUAL_MARGIN, rect.height() * VIRTUAL_MARGIN));
+        let workspace = rect.expand2(Vec2::new(rect.width() * margin, rect.height() * margin));
         let photo_long = photo_size.0.max(photo_size.1);
         let k = if photo_long > 0 { f64::from(display.width().max(display.height())) / f64::from(photo_long) } else { 1.0 };
         Canvas { area, rect, workspace, scale, k, photo_size, view: CanvasView { zoom, pan } }
@@ -113,6 +117,16 @@ impl Canvas {
 }
 
 impl CanvasView {
+    /// This view zoomed by `factor` about the middle of the canvas, which the photo is centred on
+    /// when the pan is zero: what a menu item's zoom does, with no pointer to keep still.
+    pub fn zoomed_about_middle(self, factor: f32) -> CanvasView {
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        CanvasView { zoom, pan: self.pan * (zoom / self.zoom) }
+    }
+
     /// This view zoomed by `factor`, keeping the point of the photo under `about` where it is.
     /// `area` is the canvas's area, whose centre the photo is centred on when the pan is zero.
     pub fn zoomed(self, factor: f32, about: Pos2, area: Rect) -> CanvasView {
@@ -560,6 +574,17 @@ pub fn draw_outline(painter: &Painter, canvas: &Canvas, outline: &OutlineView) {
     let canvas_points: Vec<Pos2> = points.iter().map(|p| canvas.photo_to_canvas(*p)).collect();
     painter.add(Shape::line(canvas_points.clone(), Stroke::new(theme::HALO_WIDTH, theme::HALO)));
     painter.add(Shape::line(canvas_points, Stroke::new(theme::OUTLINE_WIDTH, colour)));
+    // When the page will be flattened, the curved outline it will be cut along is drawn too, thin
+    // and dashed, so Flatten shows what it does before the page is finished.
+    if let Some(fitted) = outline.fitted.as_ref().filter(|line| line.len() >= 3 && outline.invalid.is_none()) {
+        let mut curve: Vec<Pos2> = fitted.iter().map(|p| canvas.photo_to_canvas(*p)).collect();
+        if let Some(first) = curve.first().copied() {
+            curve.push(first);
+        }
+        for shape in Shape::dashed_line(&curve, Stroke::new(1.5, theme::SCAN_CYAN), 5.0, 4.0) {
+            painter.add(shape);
+        }
+    }
 }
 
 /// The outline's path in photo pixels: the four sides, walked clockwise from the top-left corner

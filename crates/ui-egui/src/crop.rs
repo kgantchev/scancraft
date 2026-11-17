@@ -1,10 +1,10 @@
-//! Screen 2, Boundary Detection and Cropping (§4.3): the toolbar, the canvas, the handles and the
-//! keyboard model.
+//! Crop (§4.3): the original photo with the page's outline, the handles and the loupe, and the
+//! keyboard model. Its controls are in the inspector.
 
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Ui, Vec2};
 
 use scancraft_core::command::{Command, Corner};
-use scancraft_core::engine_api::{CropView, EngineApi, ImageKey, ViewState};
+use scancraft_core::engine_api::{CropView, EngineApi, ViewState};
 use scancraft_core::geom::{Point, Side};
 use scancraft_core::recipe::{Detector, FlattenMode, FlattenReason};
 
@@ -28,7 +28,6 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     let Some(crop) = view.crop.as_ref() else {
         return;
     };
-    photo_strip(ui, state, crop, engine);
     let area = ui.available_rect_before_wrap();
     // The canvas's own widget goes first, so the handles, made after it, are above it.
     let (rect, background) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
@@ -44,12 +43,15 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     }
     let mut zoom_and_pan = state.canvas_view;
     canvas::navigate(ui, rect, &background, &mut zoom_and_pan);
-    let canvas = Canvas::with_view(rect, &display, crop.photo_size, zoom_and_pan);
+    // The room around the photo for a corner that has left it is there only while one has: until
+    // then the photo takes everything the area has.
+    let margin = if a_corner_is_off_the_photo(crop) { canvas::VIRTUAL_MARGIN } else { 0.0 };
+    let canvas = Canvas::with_view(rect, &display, crop.photo_size, zoom_and_pan, margin);
     state.canvas_view = canvas.view;
     // Pointer and keyboard first; the loupe is held open by whatever handle is pressed now.
     state.loupe.held = false;
     let mut changed = canvas::interact_handles(ui, &canvas, crop, state, engine);
-    changed |= keyboard(ui, state, crop, &canvas, engine);
+    changed |= keyboard(ui, state, view, crop, engine);
     let refreshed;
     let crop = if changed {
         refreshed = engine.view();
@@ -73,56 +75,10 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     crate::loupe::draw(ui, &canvas, crop, state, engine);
 }
 
-/// The size of a photo's thumbnail in the strip.
-const STRIP_THUMB: Vec2 = Vec2::new(48.0, 64.0);
-
-/// The strip of every photo of the batch, so any one can be opened and corrected, in any order. A
-/// photo whose pages are all in the tray has a tick. It is not shown for a single photo.
-pub fn photo_strip(ui: &mut Ui, state: &mut UiState, crop: &CropView, engine: &mut dyn EngineApi) {
-    if crop.photos.len() < 2 {
-        return;
-    }
-    ui.add_space(4.0);
-    egui::ScrollArea::horizontal().id_salt("scancraft.photo_strip").auto_shrink([false, true]).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            for (index, tab) in crop.photos.iter().enumerate() {
-                let (rect, _) = ui.allocate_exact_size(STRIP_THUMB, Sense::hover());
-                let painter = ui.painter_at(rect.expand(3.0));
-                // Each photo keeps its own shape inside its box.
-                let shown = match state.texture(ui, engine, ImageKey::PhotoThumb(tab.photo), egui::TextureOptions::LINEAR) {
-                    Some(texture) => crate::thumb::paint_fitted(&painter, rect, &texture),
-                    None => {
-                        painter.rect_filled(rect, 2.0, theme::CANVAS_BACKGROUND);
-                        rect
-                    }
-                };
-                if tab.photo == crop.photo {
-                    let accent = theme::accent(ui.visuals().dark_mode);
-                    painter.rect_stroke(shown, 2.0, egui::Stroke::new(2.0, accent), egui::StrokeKind::Middle);
-                }
-                if tab.added {
-                    // A tick, drawn: the interface's font has no glyph for one.
-                    let c = shown.right_top() + Vec2::new(-9.0, 9.0);
-                    painter.circle_filled(c, 7.0, theme::HANDLE);
-                    let stroke = egui::Stroke::new(2.0, theme::SCAN_CYAN);
-                    painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 3.0)], stroke);
-                    painter.line_segment([c + Vec2::new(-1.0, 3.0), c + Vec2::new(4.0, -3.5)], stroke);
-                }
-                let id = ui.make_persistent_id(("scancraft.photo_tab", tab.photo));
-                let response = ui.interact(rect, id, Sense::click());
-                let label = format!("Photo {} of {}: {}", index + 1, crop.photos.len(), tab.name);
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, tab.page.is_some(), label.clone()));
-                let response = response.on_hover_text(tab.name.clone());
-                if response.clicked()
-                    && tab.photo != crop.photo
-                    && let Some(page) = tab.page
-                {
-                    canvas::dispatch(state, engine, Command::PageOpenCrop { page });
-                }
-            }
-        });
-    });
-    ui.add_space(4.0);
+/// Whether any corner of any outline is outside the photo.
+pub fn a_corner_is_off_the_photo(crop: &CropView) -> bool {
+    let (w, h) = (f64::from(crop.photo_size.0), f64::from(crop.photo_size.1));
+    crop.outlines.iter().any(|o| o.corners.0.iter().any(|c| c.x < 0.0 || c.y < 0.0 || c.x > w || c.y > h))
 }
 
 /// The Auto-Detect tooltip names the source of the corners (§4.3).
@@ -143,9 +99,9 @@ pub fn auto_detect_tooltip(origin: &scancraft_core::recipe::CornerOrigin) -> Str
 pub fn flatten_tooltip(outline: &scancraft_core::engine_api::OutlineView) -> String {
     let Some(decision) = &outline.flatten_decision else {
         return match outline.flatten {
-            FlattenMode::Auto => "Auto: the page is flattened when the checks pass".to_owned(),
-            FlattenMode::On => "On: the page is always flattened".to_owned(),
-            FlattenMode::Off => "Off: the page is flattened by its four corners".to_owned(),
+            FlattenMode::Auto => "Automatic: flattened only if its lines or edges are curved.".to_owned(),
+            FlattenMode::On => "Always: the page is flattened.".to_owned(),
+            FlattenMode::Off => "Never: the page is straightened by its four corners.".to_owned(),
         };
     };
     match decision.reason {
@@ -241,13 +197,21 @@ pub fn move_selection(crop: &CropView, selection: &Selection, dx: f64, dy: f64) 
     }
 }
 
-/// The keyboard model of Screen 2 (§4.3). Returns whether a command went to the engine.
-fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, _canvas: &Canvas, engine: &mut dyn EngineApi) -> bool {
+/// The keyboard model of Crop (§4.3). Returns whether a command went to the engine.
+///
+/// Tab walks the handles and the arrow keys nudge the selected one. With no handle selected the
+/// arrow keys go to the next page that needs a look (the one before, with left and up), or to the
+/// next page when none does. Return is Done, and so is Escape once there is nothing selected to let go of.
+fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, crop: &CropView, engine: &mut dyn EngineApi) -> bool {
     let now = ui.input(|i| i.time);
     let items = selectable_items(crop);
-    let (tab, shift, escape) = ui.input(|i| (i.key_pressed(Key::Tab), i.modifiers.shift, i.key_pressed(Key::Escape)));
-    if escape {
+    let (tab, shift, escape, enter) =
+        ui.input(|i| (i.key_pressed(Key::Tab), i.modifiers.shift, i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
+    if escape && state.selection.is_some() {
         state.selection = None;
+    } else if (escape || enter) && !state.keys_taken {
+        // Done: the page is finished and the finished page shows.
+        return canvas::dispatch(state, engine, Command::CropApply { photo: crop.photo });
     }
     if tab && !items.is_empty() {
         let next = match state.selection {
@@ -287,7 +251,12 @@ fn keyboard(ui: &Ui, state: &mut UiState, crop: &CropView, _canvas: &Canvas, eng
     if dx == 0.0 && dy == 0.0 {
         return false;
     }
-    let Some(selection) = state.selection else { return false };
+    let Some(selection) = state.selection else {
+        // Nothing to nudge: the arrows walk through the pages, the ones that need a look first.
+        let forward = right || down;
+        let to = crate::sidebar::next_flagged(view, forward).or_else(|| crate::sidebar::neighbour_page(view, forward));
+        return to.is_some_and(|page| canvas::dispatch(state, engine, Command::PageOpenCrop { page }));
+    };
     let Some(command) = move_selection(crop, &selection, dx, dy) else { return false };
     canvas::dispatch(state, engine, command);
     // The loupe shows the handle that moved, where it has moved to (§4.3). A nudge has no button

@@ -60,7 +60,16 @@ fn outline_corners() -> scancraft_core::geom::Quad {
     outline().corners
 }
 
-/// Screen 2's view: one photo of seven, with its page found.
+/// The three pages of the document: the open one, and two others, the second still being read.
+fn three_pages() -> Vec<TrayItem> {
+    vec![
+        TrayItem { page: PAGE, photo: PHOTO, number: 1, text_ready: true, state: PageState::Ready },
+        TrayItem { page: PageId(11), photo: PhotoId(111), number: 2, text_ready: false, state: PageState::Ready },
+        TrayItem { page: PageId(12), photo: PhotoId(112), number: 3, text_ready: true, state: PageState::Ready },
+    ]
+}
+
+/// Crop's view: one photo of seven, with its page found.
 fn crop_view() -> ViewState {
     ViewState {
         screen: Screen::Crop(PHOTO),
@@ -83,7 +92,7 @@ fn crop_view() -> ViewState {
             not_found: false,
         }),
         enhance: None,
-        tray: vec![TrayItem { page: PageId(10), photo: PhotoId(110), number: 1, text_ready: true, state: PageState::Ready }],
+        tray: three_pages(),
         book_spreads: false,
         can_undo: false,
         can_redo: false,
@@ -113,11 +122,7 @@ fn enhance_view() -> ViewState {
             low_resolution: false,
             more_to_come: true,
         }),
-        tray: vec![
-            TrayItem { page: PageId(10), photo: PhotoId(110), number: 1, text_ready: true, state: PageState::Ready },
-            TrayItem { page: PageId(11), photo: PhotoId(111), number: 2, text_ready: false, state: PageState::Ready },
-            TrayItem { page: PageId(12), photo: PhotoId(112), number: 3, text_ready: true, state: PageState::Ready },
-        ],
+        tray: three_pages(),
         book_spreads: false,
         can_undo: true,
         can_redo: false,
@@ -159,7 +164,7 @@ fn harness(view: ViewState, theme: egui::Theme) -> Harness<'static, TestState> {
     for look in [Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument] {
         engine = engine.with_image(ImageKey::FilterThumb(PAGE, look), picture(256, 343));
     }
-    for page in [PageId(10), PageId(11), PageId(12)] {
+    for page in [PAGE, PageId(11), PageId(12)] {
         engine = engine.with_image(ImageKey::TrayThumb(page), picture(128, 176));
     }
     harness_with(engine, theme)
@@ -167,8 +172,13 @@ fn harness(view: ViewState, theme: egui::Theme) -> Harness<'static, TestState> {
 
 /// The harness of an engine the test made, in one appearance.
 fn harness_with(engine: FakeEngine, theme: egui::Theme) -> Harness<'static, TestState> {
+    harness_sized(engine, theme, egui::vec2(1200.0, 800.0))
+}
+
+/// The harness of an engine the test made, in a window of another size.
+fn harness_sized(engine: FakeEngine, theme: egui::Theme, size: egui::Vec2) -> Harness<'static, TestState> {
     Harness::builder()
-        .with_size(egui::vec2(1200.0, 800.0))
+        .with_size(size)
         .with_theme(theme)
         // The bundled font, so the snapshots are the same on every machine.
         .with_context_setup(|ctx| ctx.set_fonts(egui::FontDefinitions::default()))
@@ -207,6 +217,16 @@ fn click_label(harness: &mut Harness<TestState>, label: &str) {
     click_at(harness, pos);
 }
 
+/// Clicks the last widget with the given label: the one drawn latest, such as a toast's button
+/// over the toolbar's of the same name.
+fn click_last_label(harness: &mut Harness<TestState>, label: &str) {
+    let bounds = {
+        let node = harness.query_all_by_label(label).last().unwrap_or_else(|| panic!("no widget labelled {label:?}"));
+        node.accesskit_node().raw_bounds().unwrap_or_else(|| panic!("the widget {label:?} has no bounds"))
+    };
+    click_at(harness, egui::Pos2::new(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32));
+}
+
 /// Clicks a point.
 fn click_at(harness: &mut Harness<TestState>, pos: egui::Pos2) {
     harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
@@ -236,14 +256,14 @@ fn can_render(harness: &mut Harness<TestState>) -> bool {
 // ---------------------------------------------------------------- the snapshots
 
 #[test]
-fn import_screen_light_snapshot() {
+fn empty_window_light_snapshot() {
     let mut harness = harness(import_view(), egui::Theme::Light);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "import_screen_light",
+        "empty_window_light",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
@@ -251,14 +271,14 @@ fn import_screen_light_snapshot() {
 }
 
 #[test]
-fn import_screen_dark_snapshot() {
+fn empty_window_dark_snapshot() {
     let mut harness = harness(import_view(), egui::Theme::Dark);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "import_screen_dark",
+        "empty_window_dark",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
@@ -266,14 +286,14 @@ fn import_screen_dark_snapshot() {
 }
 
 #[test]
-fn crop_screen_light_snapshot() {
+fn crop_view_light_snapshot() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "crop_screen_light",
+        "crop_view_light",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
@@ -281,18 +301,65 @@ fn crop_screen_light_snapshot() {
 }
 
 #[test]
-fn crop_screen_dark_snapshot() {
+fn crop_view_dark_snapshot() {
     let mut harness = harness(crop_view(), egui::Theme::Dark);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "crop_screen_dark",
+        "crop_view_dark",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
     );
+}
+
+/// The options the snapshots of the finished page share.
+fn snapshot_options() -> egui_kittest::SnapshotOptions {
+    egui_kittest::SnapshotOptions::new()
+        .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
+        .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400))
+}
+
+#[test]
+fn filter_view_with_pages_that_need_a_look_snapshot() {
+    // Amber dots on the pages, a page being prepared, and the status bar saying what is going on.
+    let mut view = enhance_view();
+    view.tray[1].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::NotFound);
+    view.tray[2].state = PageState::Preparing;
+    view.reading_text = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.step();
+    if !can_render(&mut harness) {
+        return;
+    }
+    harness.snapshot_options("filter_view_needs_a_look_light", &snapshot_options());
+}
+
+#[test]
+fn export_sheet_running_snapshot() {
+    let mut view = enhance_view();
+    view.exporting = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    if !can_render(&mut harness) {
+        return;
+    }
+    harness.snapshot_options("export_sheet_running_light", &snapshot_options());
+}
+
+#[test]
+fn export_sheet_finished_snapshot() {
+    let mut view = enhance_view();
+    view.last_export =
+        Some(scancraft_core::engine_api::ExportSummary { path: "/Users/me/Scans/Receipts.pdf".to_owned(), pages: 3, bytes: 3_412_000 });
+    let mut harness = harness(view, egui::Theme::Dark);
+    harness.run();
+    if !can_render(&mut harness) {
+        return;
+    }
+    harness.snapshot_options("export_sheet_finished_dark", &snapshot_options());
 }
 
 /// The crop screen with the top-left corner pressed, so the loupe is open: a sharp crop of the
@@ -327,24 +394,24 @@ fn loupe_snapshot(theme: egui::Theme, name: &str) {
 }
 
 #[test]
-fn crop_screen_loupe_light_snapshot() {
-    loupe_snapshot(egui::Theme::Light, "crop_screen_loupe_light");
+fn crop_loupe_light_snapshot() {
+    loupe_snapshot(egui::Theme::Light, "crop_loupe_light");
 }
 
 #[test]
-fn crop_screen_loupe_dark_snapshot() {
-    loupe_snapshot(egui::Theme::Dark, "crop_screen_loupe_dark");
+fn crop_loupe_dark_snapshot() {
+    loupe_snapshot(egui::Theme::Dark, "crop_loupe_dark");
 }
 
 #[test]
-fn enhance_screen_light_snapshot() {
+fn filter_view_light_snapshot() {
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "enhance_screen_light",
+        "filter_view_light",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
@@ -352,29 +419,14 @@ fn enhance_screen_light_snapshot() {
 }
 
 #[test]
-fn enhance_screen_dark_snapshot() {
+fn filter_view_dark_snapshot() {
     let mut harness = harness(enhance_view(), egui::Theme::Dark);
     harness.run();
     if !can_render(&mut harness) {
         return;
     }
     harness.snapshot_options(
-        "enhance_screen_dark",
-        &egui_kittest::SnapshotOptions::new()
-            .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
-            .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
-    );
-}
-
-#[test]
-fn page_tray_snapshot() {
-    let mut harness = harness(enhance_view(), egui::Theme::Dark);
-    harness.run();
-    if !can_render(&mut harness) {
-        return;
-    }
-    harness.snapshot_options(
-        "page_tray",
+        "filter_view_dark",
         &egui_kittest::SnapshotOptions::new()
             .threshold(egui_kittest::OsThreshold::new(0.0).macos(12.0).linux(12.0).windows(12.0))
             .max_failed_pixels(egui_kittest::OsThreshold::new(0).macos(400).linux(400).windows(400)),
@@ -435,99 +487,102 @@ fn the_menu_bar_has_the_items_of_the_specification() {
         "About ScanCraft",
         "Settings…",
         "Quit ScanCraft",
-        "New Session",
-        "Import…",
-        "Export to PDF…",
+        "New Scan",
+        "Add Pages…",
+        "Export PDF…",
         "Export Options…",
         "Undo",
         "Redo",
         "Delete Page",
+        "Crop",
         "Reset to Detected Edges",
-        "Use Full Image",
+        "Use Whole Photo",
         "Flatten",
-        "Straighten Side",
-        "Book Spreads",
-        "Correct Perspective",
-        "Back to Crop",
+        "Split into Two Pages",
         "Rotate Left",
         "Rotate Right",
-        "Look",
-        "Add Page",
-        "Previous Photo",
-        "Next Photo",
-        "Show Page Tray",
+        "Filter",
+        "Apply Filter to All Pages",
+        "Zoom In",
+        "Zoom Out",
+        "Zoom to Fit",
+        "Show Pages",
+        "Show Inspector",
+        "Previous Page",
+        "Next Page",
     ] {
         assert!(labels.contains(&expected), "the menu bar has no {expected:?} item: {labels:?}");
+    }
+    // What the flow no longer has.
+    for gone in ["Add Page", "Correct Perspective", "Back to Crop", "Book Spreads", "Straighten Side", "Auto-Detect", "Look", "New Session"] {
+        assert!(!labels.contains(&gone), "the menu bar still has {gone:?}: {labels:?}");
     }
     // The shortcuts of §4.7.
     let shortcut_of = |label: &str| {
         bar.items().iter().find(|item| item.label == label).and_then(|item| item.shortcut).map(|chord| chord.display(craft_keymap::Platform::Mac))
     };
-    assert_eq!(shortcut_of("Import…").as_deref(), Some("⌘O"));
-    assert_eq!(shortcut_of("Export to PDF…").as_deref(), Some("⌘E"));
+    assert_eq!(shortcut_of("Add Pages…").as_deref(), Some("⌘O"));
+    assert_eq!(shortcut_of("Export PDF…").as_deref(), Some("⌘E"));
     assert_eq!(shortcut_of("Undo").as_deref(), Some("⌘Z"));
-    assert_eq!(shortcut_of("Book Spreads").as_deref(), Some("⌥⌘B"));
-    assert_eq!(shortcut_of("Show Page Tray").as_deref(), Some("⌥⌘T"));
-}
-
-#[test]
-fn the_book_spreads_menu_item_sends_the_opposite_of_the_current_setting() {
-    // The item used to carry no parameter, so `command_of` found no command and the menu item
-    // (and its shortcut) did nothing at all.
-    for current in [false, true] {
-        let mut view = crop_view();
-        view.book_spreads = current;
-        let bar = scancraft_ui_egui::build_menu_bar(&view);
-        let item = bar.items().into_iter().find(|item| item.label == "Book Spreads").expect("the Book Spreads item");
-        let command = scancraft_ui_egui::menu::command_of(&item.command);
-        assert_eq!(command, Some(Command::CropBook { on: !current }), "with book spreads {current}");
-    }
+    assert_eq!(shortcut_of("Split into Two Pages").as_deref(), Some("⌥⌘B"));
+    assert_eq!(shortcut_of("Show Pages").as_deref(), Some("⌥⌘T"));
+    assert_eq!(shortcut_of("Show Inspector").as_deref(), Some("⌥⌘I"));
+    assert_eq!(shortcut_of("Zoom to Fit").as_deref(), Some("⌘0"));
 }
 
 #[test]
 fn a_menu_item_is_live_only_when_it_can_act() {
     use scancraft_ui_egui::menu::item_enabled;
-    // The Import screen: nothing to crop, turn, filter or export. These items were live and did nothing.
+    // The empty window: nothing to crop, turn, filter, export or zoom. These items were live and did nothing.
     let import = import_view();
     for id in [
-        "crop.apply",
         "crop.auto",
         "crop.full_image",
+        "crop.split",
         "page.rotate",
         "page.set_look",
-        "page.add",
         "page.open_crop",
+        "page.delete",
+        "page.set_look_all",
         "export.pdf",
         "file.export_options",
+        "page.previous",
+        "page.next",
+        "view.zoom_in",
+        "view.zoom_fit",
     ] {
-        assert!(!item_enabled(id, &import), "{id} is live on the Import screen");
+        assert!(!item_enabled(id, &import), "{id} is live in the empty window");
     }
     for id in ["session.new", "file.open", "app.settings"] {
-        assert!(item_enabled(id, &import), "{id} is off on the Import screen");
+        assert!(item_enabled(id, &import), "{id} is off in the empty window");
     }
-    // The crop screen: Correct Perspective acts, a filter does not. The edges are the detected
-    // ones, so there is nothing to reset.
+    // Crop, on the first page: the crop items act, a filter does not, and the edges are the
+    // detected ones, so there is nothing to reset. There is no page before the first.
     let crop = crop_view();
-    assert!(item_enabled("crop.apply", &crop) && item_enabled("crop.full_image", &crop));
-    assert!(!item_enabled("page.set_look", &crop));
-    assert!(!item_enabled("crop.auto", &crop), "Reset to Detected Edges is live on detected edges");
+    for id in ["crop.full_image", "crop.split", "page.rotate", "page.delete", "export.pdf", "page.set_look_all", "page.next", "view.zoom_in"] {
+        assert!(item_enabled(id, &crop), "{id} is off in Crop");
+    }
+    for id in ["page.set_look", "page.open_crop", "crop.auto", "page.previous"] {
+        assert!(!item_enabled(id, &crop), "{id} is live in Crop");
+    }
     let mut by_hand = crop_view();
     by_hand.crop.as_mut().expect("the crop view").auto_detect = false;
     assert!(item_enabled("crop.auto", &by_hand));
-    // No side is bent, so there is nothing to straighten.
-    assert!(!item_enabled("crop.straighten_side", &crop));
-    // The filter screen: a filter acts, Correct Perspective does not.
+    // The finished page: a filter and Crop act, the crop items do not.
     let enhance = enhance_view();
-    assert!(item_enabled("page.set_look", &enhance) && item_enabled("page.rotate", &enhance) && item_enabled("export.pdf", &enhance));
-    assert!(!item_enabled("crop.apply", &enhance));
-    // The first photo has no photo before it; the second has both.
-    assert!(item_enabled("page.previous", &crop) && item_enabled("page.next", &crop));
-    let mut first = crop_view();
-    {
-        let crop = first.crop.as_mut().expect("the crop view");
-        crop.photo = crop.photos[0].photo;
+    for id in ["page.set_look", "page.open_crop", "page.rotate", "export.pdf"] {
+        assert!(item_enabled(id, &enhance), "{id} is off on the finished page");
     }
-    assert!(!item_enabled("page.previous", &first));
+    for id in ["crop.full_image", "crop.split", "crop.auto"] {
+        assert!(!item_enabled(id, &enhance), "{id} is live on the finished page");
+    }
+    // The middle page has a page on each side; the last has none after it.
+    let mut middle = enhance_view();
+    middle.enhance.as_mut().expect("the enhance view").page = PageId(11);
+    assert!(item_enabled("page.previous", &middle) && item_enabled("page.next", &middle));
+    let mut last = enhance_view();
+    last.enhance.as_mut().expect("the enhance view").page = PageId(12);
+    assert!(item_enabled("page.previous", &last) && !item_enabled("page.next", &last));
 }
 
 #[test]
@@ -580,26 +635,40 @@ fn reset_to_detected_edges_does_nothing_while_the_edges_are_the_detected_ones() 
 }
 
 #[test]
-fn use_full_image_sends_crop_full_image() {
+fn use_whole_photo_sends_crop_full_image() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Use Full Image");
+    click_label(&mut harness, "Use Whole Photo");
     assert_eq!(dispatched(&harness), vec![Command::CropFullImage { page: PAGE }]);
 }
 
 #[test]
-fn correct_perspective_sends_crop_apply() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Correct Perspective");
-    assert_eq!(dispatched(&harness), vec![Command::CropApply { photo: PHOTO }]);
+fn done_the_filter_switch_and_return_all_finish_the_crop() {
+    // Done in the inspector, the Filter side of the switch, and the Return key all send crop.apply.
+    for how in ["Done", "Filter", "Return", "Escape"] {
+        let mut harness = harness(crop_view(), egui::Theme::Light);
+        harness.run();
+        match how {
+            "Return" => {
+                harness.key_press(egui::Key::Enter);
+                harness.run();
+            }
+            "Escape" => {
+                // With nothing selected, Escape has nothing to let go of: it is Done.
+                harness.key_press(egui::Key::Escape);
+                harness.run();
+            }
+            label => click_label(&mut harness, label),
+        }
+        assert_eq!(dispatched(&harness), vec![Command::CropApply { photo: PHOTO }], "with {how}");
+    }
 }
 
 #[test]
-fn discard_photo_sends_import_discard() {
+fn remove_photo_sends_import_discard() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Discard Photo");
+    click_label(&mut harness, "Remove Photo");
     assert_eq!(dispatched(&harness), vec![Command::ImportDiscard { item: PHOTO }]);
 }
 
@@ -607,16 +676,33 @@ fn discard_photo_sends_import_discard() {
 fn the_flatten_control_sends_crop_set_flatten() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "On");
+    click_label(&mut harness, "Always");
     assert_eq!(dispatched(&harness), vec![Command::CropSetFlatten { page: PAGE, mode: FlattenMode::On }]);
 }
 
 #[test]
-fn book_spreads_sends_crop_book() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Book Spreads");
-    assert_eq!(dispatched(&harness), vec![Command::CropBook { on: true }]);
+fn splitting_a_photo_sends_crop_split_and_the_offer_for_every_photo_sends_crop_book() {
+    // One page: the switch is off, and turning it on splits this photo.
+    let mut one = harness(crop_view(), egui::Theme::Light);
+    one.run();
+    assert!(one.query_all_by_label("Do this for every photo in this scan").next().is_none(), "the offer is there before the split");
+    click_label(&mut one, "Split into two pages");
+    assert_eq!(dispatched(&one), vec![Command::CropSplit { photo: PHOTO, on: true }]);
+    // Two pages: the switch is on, and below it the same cut can be asked for every photo.
+    let mut view = crop_view();
+    let crop = view.crop.as_mut().expect("the crop view");
+    let mut right = crop.outlines[0].clone();
+    right.page = PageId(2);
+    crop.outlines[0].half = Some(Half::Left);
+    right.half = Some(Half::Right);
+    crop.outlines.push(right);
+    let mut two = harness(view, egui::Theme::Light);
+    two.run();
+    click_label(&mut two, "Do this for every photo in this scan");
+    assert_eq!(dispatched(&two), vec![Command::CropBook { on: true }]);
+    two.state_mut().1.clear();
+    click_label(&mut two, "Split into two pages");
+    assert_eq!(dispatched(&two), vec![Command::CropSplit { photo: PHOTO, on: false }]);
 }
 
 #[test]
@@ -632,10 +718,10 @@ fn the_restore_banner_sends_session_restore_and_session_new() {
 }
 
 #[test]
-fn browse_files_asks_the_shell_for_the_open_panel() {
+fn choose_files_asks_the_shell_for_the_open_panel() {
     let mut harness = harness(import_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Browse Files…");
+    click_label(&mut harness, "Choose Files…");
     assert_eq!(harness.state_mut().0.take_actions(), vec![UiAction::ImportFiles]);
 }
 
@@ -735,24 +821,6 @@ fn rotate_right_sends_page_rotate_by_one_quarter_turn() {
 }
 
 #[test]
-fn back_to_crop_opens_the_corners_screen() {
-    // It used to send page.edit, which reopens Screen 3, so the button did nothing.
-    let mut harness = harness(enhance_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Back to Crop");
-    assert_eq!(dispatched(&harness), vec![Command::PageOpenCrop { page: PAGE }]);
-}
-
-#[test]
-fn the_back_to_crop_menu_item_opens_the_corners_screen_too() {
-    for view in [enhance_view(), crop_view()] {
-        let bar = scancraft_ui_egui::build_menu_bar(&view);
-        let item = bar.items().into_iter().find(|item| item.label == "Back to Crop").expect("the Back to Crop item");
-        assert_eq!(scancraft_ui_egui::menu::command_of(&item.command), Some(Command::PageOpenCrop { page: PAGE }));
-    }
-}
-
-#[test]
 fn the_label_window_asks_for_a_folder_and_then_writes_the_label() {
     let mut harness = harness(crop_view(), egui::Theme::Light);
     {
@@ -776,21 +844,16 @@ fn the_label_window_asks_for_a_folder_and_then_writes_the_label() {
 }
 
 #[test]
-fn add_page_sends_page_add() {
-    let mut harness = harness(enhance_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Add Page & Next");
-    assert_eq!(dispatched(&harness), vec![Command::PageAdd { page: PAGE }]);
-}
-
-#[test]
-fn export_asks_the_shell_for_the_save_panel_with_the_options() {
-    let mut harness = harness(enhance_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Export to PDF");
-    let actions = harness.state_mut().0.take_actions();
-    assert_eq!(actions.len(), 1, "the export asked for {actions:?}");
-    assert!(matches!(actions[0], UiAction::ExportPdf { .. }), "the export asked for {actions:?}");
+fn export_pdf_asks_the_shell_for_the_save_panel_at_once() {
+    // From the finished page and from Crop alike: no question first.
+    for view in [enhance_view(), crop_view()] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        click_label(&mut harness, "Export PDF");
+        let actions = harness.state_mut().0.take_actions();
+        assert_eq!(actions.len(), 1, "the export asked for {actions:?}");
+        assert!(matches!(actions[0], UiAction::ExportPdf { .. }), "the export asked for {actions:?}");
+    }
 }
 
 #[test]
@@ -815,29 +878,28 @@ fn a_tray_drag_sends_page_move() {
 }
 
 #[test]
-fn deleting_from_the_tray_sends_page_delete() {
+fn the_delete_key_deletes_the_page_that_is_open() {
+    // The key used to delete whichever page was clicked last, from any screen, with nothing to say so.
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Page 2");
-    harness.state_mut().1.clear();
     harness.key_press(egui::Key::Backspace);
     harness.run();
-    assert_eq!(dispatched(&harness), vec![Command::PageDelete { page: PageId(11) }]);
+    assert_eq!(dispatched(&harness), vec![Command::PageDelete { page: PAGE }]);
 }
 
 #[test]
 fn deleting_a_page_says_so_and_offers_an_undo() {
-    // The Delete key works from every screen, and nothing on screen said that a page had gone.
+    // The Delete key works from every view, and nothing on screen said that a page had gone.
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Page 2");
     harness.key_press(egui::Key::Backspace);
     harness.run();
-    assert!(shown_text(&harness).contains("Page 2 deleted"), "nothing said the page was deleted: {}", shown_text(&harness));
+    assert!(shown_text(&harness).contains("Page 1 deleted"), "nothing said the page was deleted: {}", shown_text(&harness));
     harness.state_mut().1.clear();
-    click_label(&mut harness, "Undo");
+    // The toast's Undo is drawn over the toolbar's, which has the same name.
+    click_last_label(&mut harness, "Undo");
     assert_eq!(dispatched(&harness), vec![Command::EditUndo]);
-    assert!(!shown_text(&harness).contains("Page 2 deleted"), "the toast stayed after its Undo was used");
+    assert!(!shown_text(&harness).contains("Page 1 deleted"), "the toast stayed after its Undo was used");
 }
 
 // ------------------------------------------------------------ the geometry
@@ -908,7 +970,7 @@ fn zooming_keeps_the_point_under_the_pointer_still() {
     let pointer = egui::pos2(500.0, 300.0);
     let photo = before.canvas_to_photo(pointer);
     let view = CanvasView::default().zoomed(3.0, pointer, area);
-    let after = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), view);
+    let after = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), view, scancraft_ui_egui::canvas::VIRTUAL_MARGIN);
     assert!((after.view.zoom - 3.0).abs() < 1e-6);
     let still = after.photo_to_canvas(photo);
     assert!((still.x - pointer.x).abs() < 0.01 && (still.y - pointer.y).abs() < 0.01, "the photo point moved to {still:?}");
@@ -922,10 +984,16 @@ fn the_pan_cannot_take_the_photo_off_the_canvas() {
     let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
     let display = picture(600, 450);
     let far = CanvasView { zoom: 2.0, pan: egui::vec2(50_000.0, -50_000.0) };
-    let canvas = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), far);
+    let canvas = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), far, scancraft_ui_egui::canvas::VIRTUAL_MARGIN);
     assert!(canvas.workspace.intersects(area.shrink(31.0)), "the photo {:?} left the canvas {area:?}", canvas.workspace);
     // Not zoomed in, there is nothing to pan: the photo stays where the fit puts it.
-    let whole = scancraft_ui_egui::canvas::Canvas::with_view(area, &display, (1200, 900), CanvasView { zoom: 1.0, pan: egui::vec2(300.0, 300.0) });
+    let whole = scancraft_ui_egui::canvas::Canvas::with_view(
+        area,
+        &display,
+        (1200, 900),
+        CanvasView { zoom: 1.0, pan: egui::vec2(300.0, 300.0) },
+        scancraft_ui_egui::canvas::VIRTUAL_MARGIN,
+    );
     assert_eq!(whole.rect, scancraft_ui_egui::canvas::Canvas::new(area, &display, (1200, 900)).rect);
 }
 
@@ -1052,13 +1120,17 @@ fn the_not_found_hint_is_shown_when_detection_found_nothing() {
 }
 
 #[test]
-fn an_invalid_outline_disables_correct_perspective_with_a_reason() {
-    let mut view = crop_view();
-    view.crop.as_mut().expect("the crop view").outlines[0].invalid = Some("That shape is not a page.".to_owned());
-    let mut harness = harness(view, egui::Theme::Light);
+fn done_with_an_outline_the_engine_refuses_says_why_and_stays_in_crop() {
+    // The engine refuses to finish a page whose outline is not a shape, and says why; the interface
+    // shows it, and the user is still in Crop to put it right.
+    let mut engine = FakeEngine::with_view(crop_view()).with_image(ImageKey::DisplayCopy(PHOTO), picture(600, 450));
+    engine.set_error("The outline isn't valid: a corner is outside the page.");
+    let mut harness = harness_with(engine, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Correct Perspective");
-    assert!(dispatched(&harness).is_empty(), "the invalid outline let the perspective through");
+    click_label(&mut harness, "Done");
+    assert_eq!(dispatched(&harness), vec![Command::CropApply { photo: PHOTO }]);
+    assert!(shown_text(&harness).contains("The outline isn't valid"), "{}", shown_text(&harness));
+    assert!(harness.query_all_by_label("Use Whole Photo").next().is_some(), "Crop's tools are gone");
 }
 
 #[test]
@@ -1115,13 +1187,6 @@ fn the_low_resolution_note_is_shown() {
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
     assert!(shown_text(&harness).contains("under 150 DPI"), "the screen does not warn about the resolution");
-}
-
-#[test]
-fn the_page_count_and_position_are_shown() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    assert!(shown_text(&harness).contains("Photo 2 of 7"), "the screen does not show the photo's position");
 }
 
 #[test]
@@ -1270,18 +1335,6 @@ fn dragging_a_sides_pill_sends_crop_move_side_along_its_outward_normal() {
     }
     // The top side's outward normal points up the screen, so the offsets add up to the drag.
     assert!((total - 12.0 / per_pixel).abs() < 1.0, "the side moved {total} photo pixels, not {}", 12.0 / per_pixel);
-}
-
-#[test]
-fn the_strip_lists_every_photo_and_a_click_opens_it() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    for n in 1..=7 {
-        assert!(harness.query_by_label(&format!("Photo {n} of 7: IMG_{n}.jpg")).is_some(), "no tab for photo {n}");
-    }
-    let target = bounds_of(&harness, "Photo 4 of 7: IMG_4.jpg").center();
-    click_at(&mut harness, target);
-    assert_eq!(dispatched(&harness), vec![Command::PageOpenCrop { page: PageId(204) }]);
 }
 
 #[test]
@@ -1465,16 +1518,16 @@ fn the_corner_the_keyboard_selected_is_ringed() {
 #[test]
 fn arrow_keys_change_the_filter_unless_the_strength_slider_has_the_focus() {
     // The arrow keys moved the filter even while the strength slider had the focus and was moving
-    // itself with them.
+    // itself with them. Up and down go through the list of filters.
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
-    harness.key_press(egui::Key::ArrowLeft);
+    harness.key_press(egui::Key::ArrowDown);
     harness.run();
     assert!(dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })), "an arrow key did nothing with no focus");
     harness.state_mut().1.clear();
     harness.query_all_by_label("Strength").next().expect("the strength slider").focus();
     harness.run();
-    harness.key_press(egui::Key::ArrowLeft);
+    harness.key_press(egui::Key::ArrowDown);
     harness.run();
     assert!(
         !dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })),
@@ -1490,7 +1543,7 @@ fn arrow_keys_still_change_the_filter_after_a_click_on_a_filter() {
     harness.run();
     click_label(&mut harness, "Grayscale filter");
     harness.state_mut().1.clear();
-    harness.key_press(egui::Key::ArrowRight);
+    harness.key_press(egui::Key::ArrowDown);
     harness.run();
     assert!(
         dispatched(&harness).iter().any(|c| matches!(c, Command::PageSetLook { .. })),
@@ -1556,7 +1609,7 @@ fn a_note_s_undo_turns_the_page_back_and_nothing_else() {
     view.enhance.as_mut().expect("the enhance view").quarter_turns = 1;
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Undo");
+    click_last_label(&mut harness, "Undo");
     assert_eq!(dispatched(&harness), vec![Command::PageRotate { page: PAGE, quarter_turns: -1 }]);
 }
 
@@ -1566,7 +1619,7 @@ fn a_note_s_undo_leaves_the_page_flat_and_nothing_else() {
     view.enhance.as_mut().expect("the enhance view").flattened_automatically = true;
     let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Undo");
+    click_last_label(&mut harness, "Undo");
     assert_eq!(dispatched(&harness), vec![Command::CropSetFlatten { page: PAGE, mode: FlattenMode::Off }]);
 }
 
@@ -1607,13 +1660,16 @@ fn a_thumbnail_keeps_the_shape_of_its_page() {
     // like a portrait one.
     let engine = FakeEngine::with_view(enhance_view())
         .with_image(ImageKey::LookPreview(PAGE), picture(600, 450))
-        .with_image(ImageKey::TrayThumb(PageId(10)), picture(200, 100))
+        .with_image(ImageKey::TrayThumb(PAGE), picture(200, 100))
         .with_image(ImageKey::TrayThumb(PageId(11)), picture(100, 200))
         .with_image(ImageKey::TrayThumb(PageId(12)), picture(128, 176));
     let mut harness = harness_with(engine, egui::Theme::Light);
     harness.run();
-    let thumbs: Vec<egui::Rect> =
-        painted_images(&harness).into_iter().filter(|r| r.width() <= 70.0 && r.height() <= 90.0 && r.width() > 8.0).collect();
+    // The sidebar's boxes are 116 × 150: a picture fills one side of its box and no more.
+    let thumbs: Vec<egui::Rect> = painted_images(&harness)
+        .into_iter()
+        .filter(|r| ((r.width() - 116.0).abs() < 0.5 && r.height() <= 150.5) || ((r.height() - 150.0).abs() < 0.5 && r.width() <= 116.5))
+        .collect();
     assert!(thumbs.len() >= 3, "{} thumbnails were painted", thumbs.len());
     let aspects: Vec<f32> = thumbs.iter().map(|r| r.width() / r.height()).collect();
     for expected in [2.0, 0.5, 128.0 / 176.0] {
@@ -1652,86 +1708,438 @@ fn a_canvas_is_never_blank_without_saying_why() {
 
 // -------------------------------------------------------------- the stages
 
+// ---------------------------------------------------------------- the toolbar
+
 #[test]
-fn the_stage_bar_names_the_four_stages_and_marks_the_current_one() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    for label in ["Step 1 of 4: Import", "Step 2 of 4: Crop", "Step 3 of 4: Enhance", "Step 4 of 4: Export"] {
-        assert!(harness.query_all_by_label(label).next().is_some(), "no stage {label:?}");
+fn the_toolbar_has_add_the_switch_the_page_buttons_history_and_export() {
+    for view in [enhance_view(), crop_view()] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        for label in ["Add", "Filter", "Crop", "Rotate Left", "Rotate Right", "Delete", "Undo", "Redo", "Export PDF", "Export options"] {
+            assert!(harness.query_all_by_label(label).next().is_some(), "the toolbar has no {label:?}");
+        }
+        // They are along the top, in a row, with Export PDF at the far end.
+        let add = bounds_of(&harness, "Add");
+        let export = bounds_of(&harness, "Export PDF");
+        assert!(add.max.y < 56.0 && export.max.y < 56.0, "the toolbar is not along the top");
+        assert!(add.min.x < 60.0 && export.min.x > 900.0, "Add is at the start and Export PDF at the end: {add:?} {export:?}");
     }
-    let node = harness.query_all_by_label("Step 2 of 4: Crop").next().expect("the Crop stage");
-    assert_eq!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True));
-    let node = harness.query_all_by_label("Step 3 of 4: Enhance").next().expect("the Enhance stage");
-    assert_ne!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True));
 }
 
 #[test]
-fn the_import_stage_shows_the_drop_zone_over_the_crop_screen_and_back() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Step 1 of 4: Import");
-    assert!(
-        shown_text(&harness).contains("Drop photos or PDFs here") || harness.query_all_by_label_contains("Drop photos or PDFs here").next().is_some()
-    );
-    assert!(dispatched(&harness).is_empty(), "going to Import is the interface's own move");
-    click_label(&mut harness, "Step 2 of 4: Crop");
-    assert!(harness.query_all_by_label("Correct Perspective").next().is_some());
-}
-
-#[test]
-fn the_enhance_stage_from_crop_applies_the_perspective() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    click_label(&mut harness, "Step 3 of 4: Enhance");
-    assert_eq!(dispatched(&harness), vec![Command::CropApply { photo: PHOTO }]);
-}
-
-#[test]
-fn the_export_stage_asks_the_shell_for_the_save_panel() {
+fn add_in_the_toolbar_asks_the_shell_for_the_open_panel() {
     let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Step 4 of 4: Export");
-    let actions = harness.state_mut().0.take_actions();
-    assert!(actions.iter().any(|a| matches!(a, scancraft_ui_egui::UiAction::ExportPdf { .. })), "{actions:?}");
+    click_label(&mut harness, "Add");
+    assert_eq!(harness.state_mut().0.take_actions(), vec![UiAction::ImportFiles]);
 }
 
 #[test]
-fn the_tools_are_not_in_the_step_bar_and_the_steps_are_not_in_the_tools() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
-    harness.run();
-    let tools = bounds_of(&harness, "Use Full Image");
-    let step = bounds_of(&harness, "Correct Perspective");
-    assert!(tools.max.x < 300.0, "the tools are in the left panel");
-    assert!(step.min.y > tools.max.y, "the step button is below the tools, in the step bar");
+fn rotate_and_delete_in_the_toolbar_act_on_the_open_page() {
+    for (label, expected) in [
+        ("Rotate Left", Command::PageRotate { page: PAGE, quarter_turns: -1 }),
+        ("Rotate Right", Command::PageRotate { page: PAGE, quarter_turns: 1 }),
+        ("Delete", Command::PageDelete { page: PAGE }),
+    ] {
+        for view in [enhance_view(), crop_view()] {
+            let mut harness = harness(view, egui::Theme::Light);
+            harness.run();
+            click_label(&mut harness, label);
+            assert_eq!(dispatched(&harness), vec![expected.clone()], "{label}");
+        }
+    }
 }
 
 #[test]
-fn exporting_with_photos_waiting_asks_first() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
+fn undo_and_redo_in_the_toolbar_are_live_only_when_there_is_something_to_undo_or_redo() {
+    // The finished page's view can undo and not redo.
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Export to PDF");
-    assert!(harness.state_mut().0.take_actions().is_empty(), "the Save panel waits for the answer");
-    assert!(harness.query_all_by_label_contains("haven't been added").next().is_some(), "the question is shown");
-    click_label(&mut harness, "Export");
-    let actions = harness.state_mut().0.take_actions();
-    assert!(actions.iter().any(|a| matches!(a, scancraft_ui_egui::UiAction::ExportPdf { .. })), "{actions:?}");
+    assert!(!harness.query_all_by_label("Undo").next().expect("Undo").accesskit_node().is_disabled());
+    assert!(harness.query_all_by_label("Redo").next().expect("Redo").accesskit_node().is_disabled());
+    click_label(&mut harness, "Redo");
+    assert!(dispatched(&harness).is_empty(), "a disabled Redo sent {:?}", dispatched(&harness));
+    click_label(&mut harness, "Undo");
+    assert_eq!(dispatched(&harness), vec![Command::EditUndo]);
 }
 
 #[test]
-fn cancelling_the_question_exports_nothing() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
+fn the_switch_goes_to_crop_and_back() {
+    let mut finished = harness(enhance_view(), egui::Theme::Light);
+    finished.run();
+    let node = finished.query_all_by_label("Filter").next().expect("the Filter side");
+    assert_eq!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True), "Filter is on while the finished page shows");
+    click_label(&mut finished, "Crop");
+    assert_eq!(dispatched(&finished), vec![Command::PageOpenCrop { page: PAGE }]);
+    let mut cropping = harness(crop_view(), egui::Theme::Light);
+    cropping.run();
+    let node = cropping.query_all_by_label("Crop").next().expect("the Crop side");
+    assert_eq!(node.accesskit_node().data().toggled(), Some(egui::accesskit::Toggled::True), "Crop is on while Crop shows");
+    // Leaving Crop is Done: the page is finished.
+    click_label(&mut cropping, "Filter");
+    assert_eq!(dispatched(&cropping), vec![Command::CropApply { photo: PHOTO }]);
+}
+
+#[test]
+fn export_pdf_is_off_while_photos_are_being_read() {
+    let mut view = enhance_view();
+    view.importing = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Export to PDF");
+    assert!(harness.query_all_by_label("Export PDF").next().expect("Export PDF").accesskit_node().is_disabled());
+    click_label(&mut harness, "Export PDF");
+    assert!(harness.state_mut().0.take_actions().is_empty(), "an export started while photos were still being read");
+}
+
+#[test]
+fn a_narrow_window_moves_the_groups_that_do_not_fit_into_a_menu() {
+    let engine = FakeEngine::with_view(enhance_view()).with_image(ImageKey::LookPreview(PAGE), picture(600, 450));
+    // Wide: everything is in the row and there is no menu.
+    let mut wide = harness_with(engine, egui::Theme::Light);
+    wide.run();
+    assert!(wide.query_all_by_label("More").next().is_none());
+    // Narrow: the last groups are in the menu, which is there to open, and Export PDF stays.
+    let engine = FakeEngine::with_view(enhance_view()).with_image(ImageKey::LookPreview(PAGE), picture(600, 450));
+    let mut narrow = harness_sized(engine, egui::Theme::Light, egui::vec2(480.0, 700.0));
+    narrow.run();
+    assert!(narrow.query_all_by_label("More").next().is_some(), "nothing says that commands have moved to a menu");
+    assert!(narrow.query_all_by_label("Redo").next().is_none(), "Redo is both in the row and in the menu");
+    assert!(narrow.query_all_by_label("Export PDF").next().is_some(), "Export PDF is not at the end of the row");
+    click_label(&mut narrow, "More");
+    assert!(narrow.query_all_by_label("Redo").next().is_some(), "the menu does not hold Redo");
+}
+
+// ---------------------------------------------------------------- the sidebar
+
+#[test]
+fn the_sidebar_lists_the_pages_and_marks_the_ones_that_are_open() {
+    for (view, open) in [(enhance_view(), vec!["Page 1"]), (crop_view(), vec!["Page 1"])] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        for label in ["Page 1", "Page 2", "Page 3"] {
+            let node = harness.query_all_by_label(label).next().unwrap_or_else(|| panic!("no {label}"));
+            let on = node.accesskit_node().data().toggled() == Some(egui::accesskit::Toggled::True);
+            assert_eq!(on, open.contains(&label), "{label}");
+        }
+        // They are in a column down the left of the window, in order.
+        let (first, third) = (bounds_of(&harness, "Page 1"), bounds_of(&harness, "Page 3"));
+        assert!(first.max.x < 160.0 && third.min.y > first.max.y, "{first:?} {third:?}");
+    }
+}
+
+#[test]
+fn a_page_that_needs_a_look_or_is_being_prepared_or_failed_says_so() {
+    let mut view = enhance_view();
+    view.tray[0].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::NotFound);
+    view.tray[1].state = PageState::Preparing;
+    view.tray[2].state = PageState::Failed("the file is gone".to_owned());
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    for label in ["Page 1, needs a look", "Page 2, being prepared", "Page 3, could not be made"] {
+        assert!(harness.query_all_by_label(label).next().is_some(), "no {label:?}");
+    }
+}
+
+#[test]
+fn photos_still_being_read_have_a_placeholder_each() {
+    let mut view = enhance_view();
+    view.importing = Some(scancraft_core::engine_api::Progress { done: 1, total: 4 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.step();
+    // Three of the four photos are still being read.
+    assert_eq!(harness.query_all_by_label("Reading the photo…").count(), 3);
+}
+
+#[test]
+fn a_click_opens_the_page_in_the_view_the_window_is_in() {
+    let mut finished = harness(enhance_view(), egui::Theme::Light);
+    finished.run();
+    click_label(&mut finished, "Page 3");
+    assert_eq!(dispatched(&finished), vec![Command::PageEdit { page: PageId(12) }]);
+    let mut cropping = harness(crop_view(), egui::Theme::Light);
+    cropping.run();
+    click_label(&mut cropping, "Page 3");
+    assert_eq!(dispatched(&cropping), vec![Command::PageOpenCrop { page: PageId(12) }]);
+}
+
+#[test]
+fn the_sidebar_can_be_hidden_from_the_view_menu() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    assert!(harness.query_all_by_label("Page 1").next().is_some());
+    let (ui, engine) = harness.state_mut();
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::TOGGLE_PAGES), engine);
+    harness.run();
+    assert!(harness.query_all_by_label("Page 1").next().is_none(), "the pages stayed after Show Pages was turned off");
+    assert_eq!(harness.state().0.menu_item_checked(scancraft_ui_egui::menu::TOGGLE_PAGES), Some(false));
+}
+
+// --------------------------------------------------------------- the inspector
+
+#[test]
+fn the_inspector_has_the_controls_of_the_view_the_window_is_in() {
+    let mut finished = harness(enhance_view(), egui::Theme::Light);
+    finished.run();
+    for label in ["Original filter", "Black & White filter", "Grayscale filter", "Color Document filter", "Apply to All Pages", "Show Original"] {
+        assert!(finished.query_all_by_label(label).next().is_some(), "the filters have no {label:?}");
+    }
+    assert!(finished.query_all_by_label("Use Whole Photo").next().is_none(), "Crop's controls are on the finished page");
+    let mut cropping = harness(crop_view(), egui::Theme::Light);
+    cropping.run();
+    for label in ["Reset to Detected Edges", "Use Whole Photo", "Automatic", "Always", "Never", "Split into two pages", "Remove Photo", "Done"] {
+        assert!(cropping.query_all_by_label(label).next().is_some(), "Crop has no {label:?}");
+    }
+    assert!(cropping.query_all_by_label("Apply to All Pages").next().is_none(), "the filters' controls are in Crop");
+    // On the right of the window.
+    assert!(bounds_of(&cropping, "Done").min.x > 900.0);
+}
+
+#[test]
+fn apply_to_all_pages_sends_the_open_pages_filter_and_strength_to_every_page() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label(&mut harness, "Apply to All Pages");
+    assert_eq!(dispatched(&harness), vec![Command::PageSetLookAll { look: Look::ColorDocument, strength: 60 }]);
+}
+
+#[test]
+fn show_original_shows_the_unfiltered_page_while_it_is_held() {
+    let engine = FakeEngine::with_view(enhance_view())
+        .with_image(ImageKey::LookPreview(PAGE), picture(600, 450))
+        .with_image(ImageKey::OriginalPreview(PAGE), picture(300, 200));
+    let mut harness = harness_with(engine, egui::Theme::Light);
+    harness.run();
+    let asked = |h: &Harness<TestState>| h.state().1.image_requests().contains(&ImageKey::OriginalPreview(PAGE));
+    assert!(!asked(&harness), "the unfiltered page was asked for before it was wanted");
+    harness.state_mut().1.clear();
+    // Held: the button is pressed and not let go.
+    let button = bounds_of(&harness, "Show Original").center();
+    harness.hover_at(button);
+    harness.drag_at(button);
+    harness.run();
+    assert!(asked(&harness), "holding Show Original did not ask for the unfiltered page");
+    // Let go: the filtered page is back, and the unfiltered one is not asked for again.
+    harness.drop_at(button);
+    harness.run();
+    harness.state_mut().1.clear();
+    harness.run();
+    assert!(!asked(&harness), "the unfiltered page is still on show after the button was let go");
+}
+
+#[test]
+fn the_backslash_key_shows_the_original_too() {
+    let engine = FakeEngine::with_view(enhance_view())
+        .with_image(ImageKey::LookPreview(PAGE), picture(600, 450))
+        .with_image(ImageKey::OriginalPreview(PAGE), picture(300, 200));
+    let mut harness = harness_with(engine, egui::Theme::Light);
+    harness.run();
+    harness.state_mut().1.clear();
+    harness.event(egui::Event::Key { key: egui::Key::Backslash, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    harness.step();
+    assert!(harness.state().1.image_requests().contains(&ImageKey::OriginalPreview(PAGE)));
+}
+
+// -------------------------------------------------------------- the status bar
+
+#[test]
+fn the_status_bar_counts_the_pages_and_says_what_is_going_on() {
+    let mut view = enhance_view();
+    view.reading_text = Some(scancraft_core::engine_api::Progress { done: 2, total: 3 });
+    view.importing = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.step();
+    let text = shown_text(&harness);
+    for expected in ["3 pages", "Reading text 3 of 3", "Reading photo 2 of 3"] {
+        assert!(text.contains(expected), "the status bar does not say {expected:?}: {text}");
+    }
+    // It is a bar along the bottom.
+    assert!(bounds_of(&harness, "3 pages").min.y > 770.0);
+}
+
+#[test]
+fn pages_that_need_a_look_are_counted_and_show_opens_the_first() {
+    let mut view = enhance_view();
+    view.tray[1].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::LowScore);
+    view.tray[2].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::NotFound);
+    let mut flagged = harness(view, egui::Theme::Light);
+    flagged.run();
+    assert!(shown_text(&flagged).contains("2 pages need a look"), "{}", shown_text(&flagged));
+    click_label(&mut flagged, "Show");
+    assert_eq!(dispatched(&flagged), vec![Command::PageOpenCrop { page: PageId(11) }]);
+    // With none flagged, there is nothing to show.
+    let mut calm = harness(enhance_view(), egui::Theme::Light);
+    calm.run();
+    assert!(calm.query_all_by_label("Show").next().is_none());
+    assert!(!shown_text(&calm).contains("need a look"));
+}
+
+#[test]
+fn in_crop_the_arrow_keys_go_to_the_next_page_that_needs_a_look_when_nothing_is_selected() {
+    let mut view = crop_view();
+    view.tray[2].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::NotFound);
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    // Page 2 is next, but page 3 is the one that needs a look.
+    assert_eq!(dispatched(&harness), vec![Command::PageOpenCrop { page: PageId(12) }]);
+    // With a corner selected the arrow keys nudge it, as ever.
+    harness.state_mut().1.clear();
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    assert!(matches!(dispatched(&harness).as_slice(), [Command::CropSetCorner { .. }]), "{:?}", dispatched(&harness));
+}
+
+// ------------------------------------------------------------------ the canvas
+
+#[test]
+fn the_photo_takes_the_whole_canvas_until_a_corner_leaves_it() {
+    // The room for a corner to leave the photo was set aside on every side of it all the time, so
+    // the photo was a third smaller than the canvas could have made it.
+    let mut inside = harness(crop_view(), egui::Theme::Light);
+    inside.run();
+    let fitted = points_per_photo_pixel(&inside);
+    let mut view = crop_view();
+    view.crop.as_mut().expect("the crop view").outlines[0].corners.0[0] = Point::new(-60.0, 80.0);
+    let mut outside = harness(view, egui::Theme::Light);
+    outside.run();
+    let with_room = {
+        let top_left = bounds_of(&outside, "Top-left corner, -60, 80").center();
+        let top_right = bounds_of(&outside, "Top-right corner, 1080, 60").center();
+        f64::from(top_right.x - top_left.x) / 1140.0
+    };
+    assert!(fitted > with_room * 1.25, "{fitted} points to a photo pixel with every corner on the photo, {with_room} with one off it");
+    // At the window's 1200 × 800 the page takes at least half of it.
+    let photo_width = fitted * 1200.0;
+    let photo_height = fitted * 900.0;
+    assert!(photo_width * photo_height >= 0.5 * 1200.0 * 800.0 * 0.62, "the photo is {photo_width} × {photo_height}");
+}
+
+#[test]
+fn the_zoom_items_of_the_view_menu_zoom_the_page() {
+    let engine = FakeEngine::with_view(enhance_view()).with_image(ImageKey::LookPreview(PAGE), picture(600, 450));
+    let mut harness = harness_with(engine, egui::Theme::Light);
+    harness.run();
+    let width = |h: &Harness<TestState>| painted_images(h).into_iter().map(|r| r.width()).fold(0.0f32, f32::max);
+    let fitted = width(&harness);
+    let (ui, engine) = harness.state_mut();
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::ZOOM_IN), engine);
+    harness.run();
+    let zoomed = width(&harness);
+    assert!(zoomed > fitted * 1.2, "Zoom In left the page at {zoomed} from {fitted}");
+    let (ui, engine) = harness.state_mut();
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::ZOOM_FIT), engine);
+    harness.run();
+    assert!((width(&harness) - fitted).abs() < 1.0, "Zoom to Fit did not fit the page");
+}
+
+// ---------------------------------------------------------------- the menus' items
+
+#[test]
+fn the_split_item_of_the_page_menu_carries_the_state_it_goes_to() {
+    // One page: the item splits. Two: it joins.
+    let one = scancraft_ui_egui::build_menu_bar(&crop_view());
+    let item = one.items().into_iter().find(|item| item.label == "Split into Two Pages").expect("the split item");
+    assert_eq!(scancraft_ui_egui::menu::command_of(&item.command), Some(Command::CropSplit { photo: PHOTO, on: true }));
+    let mut view = crop_view();
+    let crop = view.crop.as_mut().expect("the crop view");
+    let mut right = crop.outlines[0].clone();
+    right.page = PageId(2);
+    right.half = Some(Half::Right);
+    crop.outlines[0].half = Some(Half::Left);
+    crop.outlines.push(right);
+    let two = scancraft_ui_egui::build_menu_bar(&view);
+    let item = two.items().into_iter().find(|item| item.label == "Split into Two Pages").expect("the split item");
+    assert_eq!(scancraft_ui_egui::menu::command_of(&item.command), Some(Command::CropSplit { photo: PHOTO, on: false }));
+}
+
+#[test]
+fn the_crop_item_and_apply_filter_to_all_pages_run_their_commands() {
+    let bar = scancraft_ui_egui::build_menu_bar(&enhance_view());
+    let crop = bar.items().into_iter().find(|item| item.label == "Crop").expect("the Crop item");
+    assert_eq!(scancraft_ui_egui::menu::command_of(&crop.command), Some(Command::PageOpenCrop { page: PAGE }));
+    let all = bar.items().into_iter().find(|item| item.label == "Apply Filter to All Pages").expect("the item");
+    assert_eq!(scancraft_ui_egui::menu::command_of(&all.command), Some(Command::PageSetLookAll { look: Look::ColorDocument, strength: 60 }));
+}
+
+#[test]
+fn previous_and_next_page_open_the_neighbours_in_the_view_the_window_is_in() {
+    for (view, open) in [(enhance_view(), true), (crop_view(), false)] {
+        let mut harness = harness(view, egui::Theme::Light);
+        harness.run();
+        let (ui, engine) = harness.state_mut();
+        ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::NEXT_PAGE), engine);
+        let expected = if open { Command::PageEdit { page: PageId(11) } } else { Command::PageOpenCrop { page: PageId(11) } };
+        assert_eq!(dispatched(&harness), vec![expected]);
+    }
+}
+
+// ----------------------------------------------------------------- the export sheet
+
+#[test]
+fn the_export_sheet_shows_the_progress_by_page_and_a_cancel() {
+    let mut view = enhance_view();
+    view.exporting = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    assert!(shown_text(&harness).contains("1 of 3 pages"), "{}", shown_text(&harness));
     click_label(&mut harness, "Cancel");
-    assert!(harness.state_mut().0.take_actions().is_empty());
-    assert!(harness.query_all_by_label_contains("haven't been added").next().is_none());
+    assert_eq!(dispatched(&harness), vec![Command::ExportCancel]);
+    // While it runs, the menus stand aside.
+    assert!(harness.state().0.is_modal());
 }
 
 #[test]
-fn the_menu_and_the_arrows_move_between_photos() {
-    let mut harness = harness(crop_view(), egui::Theme::Light);
+fn the_finished_sheet_names_the_file_and_offers_show_in_finder_open_and_a_new_scan() {
+    let mut view = enhance_view();
+    view.last_export =
+        Some(scancraft_core::engine_api::ExportSummary { path: "/Users/me/Scans/Receipts.pdf".to_owned(), pages: 3, bytes: 3_412_000 });
+    let mut harness = harness(view, egui::Theme::Light);
     harness.run();
-    click_label(&mut harness, "Next Photo");
-    let sent = dispatched(&harness);
-    assert!(matches!(sent.as_slice(), [Command::PageOpenCrop { .. }]) || sent.is_empty(), "{sent:?}");
+    let text = shown_text(&harness);
+    assert!(text.contains("Receipts.pdf") && text.contains("3 pages") && text.contains("3.4 MB"), "{text}");
+    click_label(&mut harness, "Show in Finder");
+    click_label(&mut harness, "Open");
+    assert_eq!(
+        harness.state_mut().0.take_actions(),
+        vec![
+            UiAction::RevealInFinder { path: "/Users/me/Scans/Receipts.pdf".to_owned() },
+            UiAction::OpenFile { path: "/Users/me/Scans/Receipts.pdf".to_owned() },
+        ]
+    );
+    // New Scan starts again; Done only closes the sheet.
+    click_label(&mut harness, "New Scan");
+    assert_eq!(dispatched(&harness), vec![Command::SessionNew]);
+    assert!(!harness.state().0.is_modal(), "the sheet stayed after New Scan");
+}
+
+#[test]
+fn done_closes_the_finished_sheet_and_it_does_not_come_back() {
+    let mut view = enhance_view();
+    view.last_export = Some(scancraft_core::engine_api::ExportSummary { path: "/tmp/a.pdf".to_owned(), pages: 1, bytes: 900 });
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    assert!(harness.state().0.is_modal());
+    click_last_label(&mut harness, "Done");
+    harness.run();
+    assert!(!harness.state().0.is_modal());
+    assert!(dispatched(&harness).is_empty());
+}
+
+#[test]
+fn a_long_scan_asks_the_engine_for_the_thumbnails_of_the_pages_in_view_only() {
+    // Every page of the list used to ask for its picture on every frame, scrolled into view or not.
+    let mut view = enhance_view();
+    view.tray = (1..=60)
+        .map(|n| TrayItem { page: PageId(1000 + n), photo: PhotoId(2000 + n), number: n as u32, text_ready: true, state: PageState::Ready })
+        .collect();
+    view.tray[0].page = PAGE;
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    let asked: std::collections::HashSet<&ImageKey> =
+        harness.state().1.image_requests().iter().filter(|key| matches!(key, ImageKey::TrayThumb(_))).collect();
+    let asked = asked.len();
+    assert!(asked > 0 && asked < 12, "{asked} thumbnails were asked for in a window that shows about four pages");
 }

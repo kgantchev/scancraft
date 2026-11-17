@@ -27,3 +27,5 @@ scancraft-apple = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 craft-settings = { workspace = true }
+egui_kittest = { workspace = true }
+image = { workspace = true }

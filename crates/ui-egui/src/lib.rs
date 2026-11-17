@@ -1,8 +1,9 @@
 //! ScanCraft's interface (specification §4, L4).
 //!
-//! The whole interface: Screens 1–3, the canvas, the loupe, the handles, the tray, the menus and
-//! the settings. It draws from the engine's [`ViewState`] and changes nothing but by dispatching
-//! a [`scancraft_core::command::Command`], so the wiring to the real engine stays one seam.
+//! The whole interface: the empty window and the workspace (the toolbar, the pages sidebar, the
+//! canvas, the inspector and the status bar), the loupe, the handles, the menus and the settings.
+//! It draws from the engine's [`ViewState`] and changes nothing but by dispatching a
+//! [`scancraft_core::command::Command`], so the wiring to the real engine stays one seam.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -12,16 +13,18 @@ pub mod crop;
 pub mod enhance;
 pub mod export;
 pub mod fake_engine;
+pub mod icons;
 pub mod import;
+pub mod inspector;
 pub mod loupe;
 pub mod menu;
+pub mod sidebar;
 pub mod state;
-pub mod stepper;
+pub mod statusbar;
 pub mod text;
 pub mod theme;
 pub mod thumb;
-pub mod tools;
-pub mod tray;
+pub mod toolbar;
 
 use scancraft_core::engine_api::{EngineApi, Notice, ViewState};
 
@@ -49,52 +52,22 @@ impl ScanCraftUi {
             self.state.export_popover = false;
         }
         self.state.keys_taken = false;
-        stepper::track_work(&mut self.state, &view);
-        let stage = stepper::current_stage(&self.state, &view);
-        let show_tray = !view.tray.is_empty() && !self.state.tray_hidden;
-        // The stage bar, along the top: where the user is in the scan, and a way to any stage.
-        egui::Panel::top("scancraft.stages")
-            .exact_size(stepper::STAGE_BAR_HEIGHT)
-            .resizable(false)
-            .show_separator_line(true)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                stepper::stage_bar(ui, &mut self.state, &view, engine);
-            });
-        // The tray's bar, along the bottom of the window (§4.5).
-        if show_tray {
-            egui::Panel::bottom("scancraft.tray").exact_size(tray::BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
-                tray::page_tray(ui, &mut self.state, &view, engine);
-            });
-        }
-        // The step bar, above the tray: the buttons that move on or back.
-        egui::Panel::bottom("scancraft.steps").exact_size(stepper::STEP_BAR_HEIGHT).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
-            stepper::step_bar(ui, &mut self.state, &view, engine);
-        });
-        // The tools, on the left: everything that changes the picture.
-        if matches!(stage, stepper::Stage::Crop | stepper::Stage::Enhance) {
-            let frame = egui::Frame::NONE.inner_margin(egui::Margin::same(12));
-            egui::Panel::left("scancraft.tools").exact_size(tools::PANEL_WIDTH).resizable(false).show_separator_line(true).frame(frame).show(
-                ui,
-                |ui| {
-                    if stage == stepper::Stage::Crop {
-                        tools::crop_tools(ui, &mut self.state, &view, engine);
-                    } else {
-                        tools::enhance_tools(ui, &mut self.state, &view, engine);
-                    }
-                },
-            );
-        }
+        self.state.show_original = false;
         self.take_engine_notices(&view);
-        egui::CentralPanel::default().show(ui, |ui| match stage {
-            stepper::Stage::Import => import::import_screen(ui, &mut self.state, &view, engine),
-            stepper::Stage::Crop => crop::crop_screen(ui, &mut self.state, &view, engine),
-            stepper::Stage::Enhance => enhance::enhance_screen(ui, &mut self.state, &view, engine),
-            stepper::Stage::Export => self.export_screen(ui),
-        });
+        self.track_export(&view);
+        // Until there are pages, and while nothing is being read, the window is the empty one.
+        let workspace = !view.tray.is_empty() || view.importing.is_some();
+        if workspace {
+            self.workspace(ui, &view, engine);
+        } else {
+            egui::CentralPanel::default().show(ui, |ui| import::import_screen(ui, &mut self.state, &view, engine));
+        }
         // Files can be dropped on the window at any time, whatever it is showing.
         self.handle_drop(ui, engine);
-        self.drop_overlay(ui, stage == stepper::Stage::Import);
+        self.drop_overlay(ui, !workspace);
+        if !self.is_modal() {
+            sidebar::delete_key(ui, &mut self.state, &view, engine);
+        }
         // The windows that float above the screens.
         if self.state.settings_open {
             export::settings_window(ui.ctx(), &mut self.state);
@@ -102,21 +75,102 @@ impl ScanCraftUi {
         if self.state.about_open {
             self.about_window(ui.ctx());
         }
-        if let Some((waiting, pages)) = self.state.confirm_export {
-            self.confirm_export_window(ui.ctx(), waiting, pages);
-        }
         if self.state.label_open {
             export::label_window(ui.ctx(), &mut self.state, &view, engine);
         }
-        // The messages float over everything, above the bars at the bottom.
-        let bottom = if show_tray { tray::BAR_HEIGHT } else { 0.0 } + stepper::STEP_BAR_HEIGHT + 12.0;
+        export::export_sheet(ui.ctx(), &mut self.state, &view, engine);
+        // The messages float over everything, above the status bar.
+        let bottom = if workspace { statusbar::HEIGHT } else { 0.0 } + 12.0;
         self.toasts(ui, engine, bottom);
+    }
+
+    /// The workspace: the toolbar along the top, the pages on the left, the inspector on the
+    /// right, the status bar along the bottom, and the page in the middle.
+    fn workspace(&mut self, ui: &mut egui::Ui, view: &ViewState, engine: &mut dyn EngineApi) {
+        egui::Panel::top("scancraft.toolbar").exact_size(toolbar::HEIGHT).resizable(false).show_separator_line(true).frame(egui::Frame::NONE).show(
+            ui,
+            |ui| {
+                toolbar::toolbar(ui, &mut self.state, view, engine);
+            },
+        );
+        egui::Panel::bottom("scancraft.status")
+            .exact_size(statusbar::HEIGHT)
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                statusbar::status_bar(ui, &mut self.state, view, engine);
+            });
+        if !self.state.sidebar_hidden {
+            craft_ui::direction::start_panel(ui, "scancraft.pages")
+                .exact_size(sidebar::WIDTH)
+                .resizable(false)
+                .show_separator_line(true)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| sidebar::sidebar(ui, &mut self.state, view, engine));
+        }
+        if !self.state.inspector_hidden && (view.crop.is_some() || view.enhance.is_some()) {
+            craft_ui::direction::end_panel(ui, "scancraft.inspector")
+                .exact_size(inspector::WIDTH)
+                .resizable(false)
+                .show_separator_line(true)
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12)))
+                .show(ui, |ui| inspector::inspector(ui, &mut self.state, view, engine));
+        }
+        // The canvas takes everything the panels leave, edge to edge, dark in both appearances.
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            if view.crop.is_some() {
+                crop::crop_screen(ui, &mut self.state, view, engine);
+            } else if view.enhance.is_some() {
+                enhance::enhance_screen(ui, &mut self.state, view, engine);
+            } else {
+                let rect = ui.available_rect_before_wrap();
+                ui.allocate_rect(rect, egui::Sense::hover());
+                theme::canvas_background(ui, rect);
+                canvas::waiting(ui, rect, &self.state.text.t("Reading your photos…"));
+            }
+        });
+    }
+
+    /// Follows the export through the sheet over the window: while it runs, and once it has been
+    /// written. It is told from the engine's view, which holds the progress and the summary.
+    fn track_export(&mut self, view: &ViewState) {
+        if view.exporting.is_some() {
+            self.state.export_sheet = state::ExportSheet::Running;
+        } else if let Some(summary) = view.last_export.as_ref().filter(|s| self.state.summary_seen.as_ref() != Some(*s)) {
+            self.state.summary_seen = Some(summary.clone());
+            self.state.export_sheet = state::ExportSheet::Finished(summary.clone());
+        } else if self.state.export_sheet == state::ExportSheet::Running {
+            // It stopped without writing a file: the engine's message says why.
+            self.state.export_sheet = state::ExportSheet::Closed;
+        }
+        if view.last_export.is_none() {
+            self.state.summary_seen = None;
+        }
     }
 
     /// Runs a menu item: the interface's own items, and the commands of the rest.
     pub fn run_menu_command(&mut self, command: &craft_menu::CommandRef, engine: &mut dyn EngineApi) {
         let view = engine.view();
         menu::handle_menu_command(command, &mut self.state, &view, engine);
+    }
+
+    /// The hash of everything the menus show: the view's, and which of the panels are showing.
+    pub fn menu_state(&self, view: &ViewState) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        menu::menu_state(view).hash(&mut hasher);
+        (self.state.sidebar_hidden, self.state.inspector_hidden).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Whether a menu item that is a switch is on: the pages and the inspector are showing.
+    pub fn menu_item_checked(&self, id: &str) -> Option<bool> {
+        match id {
+            menu::TOGGLE_PAGES => Some(!self.state.sidebar_hidden),
+            menu::TOGGLE_INSPECTOR => Some(!self.state.inspector_hidden),
+            _ => None,
+        }
     }
 
     /// What the app shell has to do this frame: open a panel, show a window.
@@ -136,7 +190,11 @@ impl ScanCraftUi {
 
     /// Whether a window of the interface is open, so the menu's items are greyed out.
     pub fn is_modal(&self) -> bool {
-        self.state.settings_open || self.state.export_popover || self.state.about_open || self.state.label_open || self.state.confirm_export.is_some()
+        self.state.settings_open
+            || self.state.export_popover
+            || self.state.about_open
+            || self.state.label_open
+            || self.state.export_sheet != state::ExportSheet::Closed
     }
 
     /// Sets the folder of the reference set the labels are written to, after the folder panel
@@ -298,41 +356,6 @@ impl ScanCraftUi {
         painter.rect_stroke(rect.shrink(6.0), 10.0, egui::Stroke::new(3.0, accent), egui::StrokeKind::Inside);
         let label = self.state.text.t("Drop to add pages");
         painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(22.0), ui.visuals().text_color());
-    }
-
-    /// The Export screen: the export runs in the app shell, so the interface says so (§4.4).
-    fn export_screen(&mut self, ui: &mut egui::Ui) {
-        let text = self.state.text.t("Exporting the PDF…");
-        ui.centered_and_justified(|ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::hover());
-                theme::spinner(ui, rect, ui.visuals().text_color());
-                ui.label(text);
-            });
-        });
-    }
-
-    /// "3 photos haven't been added. Export the 5 added pages?" (§4.8).
-    fn confirm_export_window(&mut self, ctx: &egui::Context, waiting: usize, pages: usize) {
-        let photos = self.state.text.trn(waiting as u64, "{n} photo hasn't been added.", "{n} photos haven't been added.");
-        let question = self.state.text.trn(pages as u64, "Export the {n} added page?", "Export the {n} added pages?");
-        egui::Window::new(self.state.text.t("Some photos haven't been added"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(format!("{photos} {question}"));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button(self.state.text.t("Export")).clicked() {
-                        self.state.confirm_export = None;
-                        self.state.start_export();
-                    }
-                    if ui.button(self.state.text.t("Cancel")).clicked() {
-                        self.state.confirm_export = None;
-                    }
-                });
-            });
     }
 
     /// Shows a message from the app shell, such as a refused import (§4.8).

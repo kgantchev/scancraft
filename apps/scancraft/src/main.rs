@@ -38,11 +38,12 @@ struct App {
 
 impl App {
     /// The state of a menu item for this frame.
-    fn item_state(command: &craft_menu::CommandRef, view: &ViewState) -> craft_menu::ItemState {
+    fn item_state(command: &craft_menu::CommandRef, view: &ViewState, ui: &ScanCraftUi) -> craft_menu::ItemState {
         // An item is live only when it can act on what the window shows.
         let mut state = craft_menu::ItemState { enabled: scancraft_ui_egui::menu::item_enabled(command.id.as_str(), view), checked: None };
+        // The two switches of the View menu are on while their panel shows.
+        state.checked = ui.menu_item_checked(command.id.as_str());
         match command.id.as_str() {
-            "crop.book" => state.checked = Some(view.book_spreads),
             "crop.set_flatten" => {
                 let mode = command.params.get("mode").and_then(|m| m.as_str()).unwrap_or("Auto");
                 let current = view.crop.as_ref().and_then(|crop| crop.outlines.first().map(|o| o.flatten));
@@ -101,6 +102,16 @@ impl App {
                 }
                 UiAction::OpenSettings | UiAction::ShowAbout => {
                     // The interface opens its own windows.
+                }
+                UiAction::RevealInFinder { path } => {
+                    if let Err(e) = reveal_in_finder(&path) {
+                        self.ui.notice(e, true);
+                    }
+                }
+                UiAction::OpenFile { path } => {
+                    if let Err(e) = open_file(&path) {
+                        self.ui.notice(e, true);
+                    }
                 }
                 UiAction::SettingsChanged(settings) => {
                     let engine = &mut self.engine;
@@ -190,8 +201,8 @@ impl eframe::App for App {
         // The menu bar, rebuilt from the view and laid out for the platform.
         let view = self.engine.view();
         let mut bar = scancraft_ui_egui::build_menu_bar(&view);
-        craft_menu::apply_state(&mut bar, |command| App::item_state(command, &view));
-        let state = scancraft_ui_egui::menu_state(&view);
+        craft_menu::apply_state(&mut bar, |command| App::item_state(command, &view, &self.ui));
+        let state = self.ui.menu_state(&view);
         let options = craft_menu::LayoutOptions::new("ScanCraft");
         let gate = craft_menu::Gate { modal: self.ui.is_modal(), recording_shortcut: false, text_editing: false };
         let clicks = match self.menu.as_mut() {
@@ -220,6 +231,35 @@ impl eframe::App for App {
         self.ui.ui(ui, &mut self.engine);
         self.panels(ui, frame);
         self.quit_question(ui.ctx());
+    }
+}
+
+/// Shows a file in the Finder. The path is passed as an argument, never through a shell, and
+/// only when it is absolute, so it can never be read as one of `open`'s own options.
+fn reveal_in_finder(path: &str) -> Result<(), String> {
+    require_absolute(path)?;
+    run_open(&["-R", path])
+}
+
+/// Opens a file with the program the system has for it.
+fn open_file(path: &str) -> Result<(), String> {
+    require_absolute(path)?;
+    run_open(&[path])
+}
+
+fn require_absolute(path: &str) -> Result<(), String> {
+    if std::path::Path::new(path).is_absolute() { Ok(()) } else { Err("That file's place is not known.".to_owned()) }
+}
+
+/// Runs the system's `open` with `args`; only the Mac has one.
+fn run_open(args: &[&str]) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("This can only be done on a Mac.".to_owned());
+    }
+    match std::process::Command::new("open").args(args).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("The file could not be opened ({status}).")),
+        Err(e) => Err(format!("The file could not be opened: {e}.")),
     }
 }
 
