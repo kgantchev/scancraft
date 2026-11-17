@@ -177,3 +177,44 @@ fn crop_a_page_delete_it_and_take_the_delete_back() {
     until(&mut harness, "the page to come back", |h| shown_text(h).contains("3 pages"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn several_pages_are_selected_rotated_and_deleted_together_and_one_undo_brings_them_back() {
+    let dir = std::env::temp_dir().join(format!("scancraft-flow-select-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the folder");
+    let mut harness = shell(&dir);
+    harness.step();
+    let paths: Vec<String> = (0..4).map(|seed| desk(&dir, seed)).collect();
+    harness.state_mut().engine.dispatch(Command::ImportAdd { paths }).expect("the import starts");
+    until(&mut harness, "the pages", |h| h.query_all_by_label("Page 4").next().is_some() && !h.state().engine.view().busy);
+
+    // Select the second and the third page with Command-click, and turn them together.
+    let modifiers = egui::Modifiers { command: true, mac_cmd: true, ..egui::Modifiers::NONE };
+    for label in ["Page 2", "Page 3"] {
+        let bounds = harness.query_all_by_label(label).last().and_then(|n| n.accesskit_node().raw_bounds()).expect("the page's bounds");
+        let pos = egui::pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
+        harness.event(egui::Event::ModifiersChanged(modifiers));
+        harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers });
+        harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers });
+        harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        harness.step();
+        harness.step();
+    }
+    // The open page (the first) is in the selection it was added to: three pages.
+    assert!(shown_text(&harness).contains("3 pages selected"), "{}", shown_text(&harness));
+    let turns = |h: &Harness<Shell>| h.state().engine.session().file().pages.iter().map(|p| p.quarter_turns).collect::<Vec<_>>();
+    let before = turns(&harness);
+    click(&mut harness, "Rotate Right");
+    let after = turns(&harness);
+    assert_eq!((after[0], after[1], after[2]), ((before[0] + 1) % 4, (before[1] + 1) % 4, (before[2] + 1) % 4));
+    assert_eq!(after[3], before[3], "a page that was not selected was turned");
+
+    // Delete the three, in one step; one Undo brings them back.
+    click(&mut harness, "Delete");
+    until(&mut harness, "the pages to go", |h| h.state().engine.view().tray.len() == 1);
+    assert!(shown_text(&harness).contains("3 pages deleted"), "{}", shown_text(&harness));
+    click(&mut harness, "Undo");
+    until(&mut harness, "the pages to come back", |h| h.state().engine.view().tray.len() == 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
