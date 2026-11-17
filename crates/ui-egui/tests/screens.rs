@@ -2002,26 +2002,25 @@ fn in_crop_the_arrow_keys_go_to_the_next_page_that_needs_a_look_when_nothing_is_
 // ------------------------------------------------------------------ the canvas
 
 #[test]
-fn the_photo_takes_the_whole_canvas_until_a_corner_leaves_it() {
-    // The room for a corner to leave the photo was set aside on every side of it all the time, so
-    // the photo was a third smaller than the canvas could have made it.
+fn the_photo_is_the_same_size_and_in_the_same_place_whether_or_not_a_corner_is_off_it() {
+    // The room for a corner to leave the photo was made only once a corner was off it, by
+    // shrinking the photo, so the picture jumped under the hand as the corner crossed its edge. The
+    // room is always there now. (`flow.rs` drags a corner across the edge with the real engine.)
     let mut inside = harness(crop_view(), egui::Theme::Light);
     inside.run();
-    let fitted = points_per_photo_pixel(&inside);
     let mut view = crop_view();
     view.crop.as_mut().expect("the crop view").outlines[0].corners.0[0] = Point::new(-60.0, 80.0);
     let mut outside = harness(view, egui::Theme::Light);
     outside.run();
-    let with_room = {
-        let top_left = bounds_of(&outside, "Top-left corner, -60, 80").center();
-        let top_right = bounds_of(&outside, "Top-right corner, 1080, 60").center();
-        f64::from(top_right.x - top_left.x) / 1140.0
-    };
-    assert!(fitted > with_room * 1.25, "{fitted} points to a photo pixel with every corner on the photo, {with_room} with one off it");
-    // At the window's 1200 × 800 the page takes at least half of it.
-    let photo_width = fitted * 1200.0;
-    let photo_height = fitted * 900.0;
-    assert!(photo_width * photo_height >= 0.5 * 1200.0 * 800.0 * 0.62, "the photo is {photo_width} × {photo_height}");
+    // Three corners are where they were in both views: if the photo is the same, so are they.
+    for label in ["Top-right corner, 1080, 60", "Bottom-right corner, 1100, 820", "Bottom-left corner, 100, 840"] {
+        let (a, b) = (bounds_of(&inside, label).center(), bounds_of(&outside, label).center());
+        assert!((a - b).length() < 0.05, "{label} is at {a:?} with every corner on the photo and at {b:?} with one off it");
+    }
+    // The room has a price, and it is bounded: the photo is still more than a third of the
+    // window's width.
+    let photo = points_per_photo_pixel(&inside) * 1200.0;
+    assert!(photo > 400.0, "the photo is only {photo} points wide");
 }
 
 #[test]

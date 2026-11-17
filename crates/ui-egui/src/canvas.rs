@@ -61,9 +61,11 @@ impl Canvas {
     }
 
     /// The display copy in `area`, zoomed and panned by `view`, with `margin` of the photo's size
-    /// kept free around it for a corner that has left the photo. The margin is 0 while every
-    /// corner is on the photo, so the photo is as large as the area allows, and
-    /// [`VIRTUAL_MARGIN`] while one is not.
+    /// kept free around it for a corner that has left the photo.
+    ///
+    /// The margin sets the photo's scale, so a caller that changes it while the user is working
+    /// makes the photo jump. The crop screen passes [`VIRTUAL_MARGIN`] every time, whatever the
+    /// corners are doing.
     pub fn with_view(area: Rect, display: &Rgb8, photo_size: (u32, u32), view: CanvasView, margin: f32) -> Canvas {
         let margin = if margin.is_finite() { margin.clamp(0.0, VIRTUAL_MARGIN) } else { 0.0 };
         let dw = display.width() as f32;
@@ -497,7 +499,10 @@ pub fn waiting(ui: &mut Ui, rect: Rect, label: &str) {
 pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) {
     // Edge to edge: the dark fills the whole canvas, not a box inside it.
     theme::canvas_background(ui, canvas.area);
-    draw_virtual_area(ui, canvas, crop);
+    // The room around the photo is shown while it is in use: a corner is out in it, or a handle is
+    // held and may be taken there. It is there, and the photo does not move, either way.
+    let room_in_use = crate::crop::a_corner_is_off_the_photo(crop) || state.pressed_handle.is_some();
+    draw_virtual_area(ui, canvas, crop, room_in_use);
     let Some(texture) = state.texture(ui, engine, scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo), egui::TextureOptions::LINEAR) else {
         return;
     };
@@ -514,10 +519,13 @@ pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiStat
 
 /// Draws the room around the photo, where a corner can be put when the page's real corner is out
 /// of the camera's view: a lighter field, the photo's own edge, and the part of the page outline
-/// that lies out there, tinted, so the "virtual" page reads as a continuation of the photo.
-fn draw_virtual_area(ui: &Ui, canvas: &Canvas, crop: &CropView) {
+/// that lies out there, tinted, so the "virtual" page reads as a continuation of the photo. The
+/// lighter field is drawn only while the room is `in_use`; the photo's edge always is.
+fn draw_virtual_area(ui: &Ui, canvas: &Canvas, crop: &CropView, in_use: bool) {
     let painter = ui.painter_at(canvas.workspace.intersect(canvas.area));
-    painter.rect_filled(canvas.workspace, 0.0, Color32::from_white_alpha(10));
+    if in_use {
+        painter.rect_filled(canvas.workspace, 0.0, Color32::from_white_alpha(10));
+    }
     // Dashed edges mark where the camera's view ends.
     let edge = Stroke::new(1.0, Color32::from_white_alpha(90));
     let corners = [canvas.rect.left_top(), canvas.rect.right_top(), canvas.rect.right_bottom(), canvas.rect.left_bottom(), canvas.rect.left_top()];

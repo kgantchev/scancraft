@@ -218,3 +218,86 @@ fn several_pages_are_selected_rotated_and_deleted_together_and_one_undo_brings_t
     until(&mut harness, "the pages to come back", |h| h.state().engine.view().tray.len() == 4);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The middle of the handle or control whose name starts with `label`.
+fn centre_of(harness: &Harness<Shell>, label: &str) -> egui::Pos2 {
+    let node = harness.query_all_by_label_contains(label).next().unwrap_or_else(|| panic!("no widget labelled {label:?}"));
+    let bounds = node.accesskit_node().raw_bounds().unwrap_or_else(|| panic!("{label:?} has no bounds"));
+    egui::pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32)
+}
+
+#[test]
+fn dragging_a_corner_out_of_the_photo_does_not_move_or_resize_the_photo() {
+    // The canvas used to make room around the photo only once a corner was off it, and made it by
+    // shrinking the photo. The picture jumped under the pointer at the moment the corner crossed
+    // the edge, which is where the corner has to be put with care.
+    let dir = std::env::temp_dir().join(format!("scancraft-flow-edge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the folder");
+    let mut harness = shell(&dir);
+    harness.step();
+    harness.state_mut().engine.dispatch(Command::ImportAdd { paths: vec![desk(&dir, 0)] }).expect("the import starts");
+    until(&mut harness, "the page", |h| h.query_all_by_label("Page 1").next().is_some() && !h.state().engine.view().busy);
+    click(&mut harness, "Crop");
+    // The corners are there once the photo's display copy has been made.
+    until(&mut harness, "the corners", |h| h.query_all_by_label_contains("Top-left corner").next().is_some());
+
+    // Two corners the drag does not touch say where the photo is and how large: where their
+    // handles are on screen, for the photo points they are at, fixes both.
+    let fingerprint = |h: &Harness<Shell>| (centre_of(h, "Top-right corner, 136, 16"), centre_of(h, "Bottom-left corner, 24, 104"));
+    let before = fingerprint(&harness);
+    let per_pixel = (before.0.x - before.1.x) / (136.0 - 24.0);
+    let grab = centre_of(&harness, "Top-left corner, 24, 16");
+    // Where the pointer goes to put the corner at a photo point: as the picture is now.
+    let at = |x: f32, y: f32| grab + egui::vec2((x - 24.0) * per_pixel, (y - 16.0) * per_pixel);
+    let same = |h: &Harness<Shell>, when: &str| {
+        let now = fingerprint(h);
+        let moved = (now.0 - before.0).length().max((now.1 - before.1).length());
+        assert!(moved < 0.05, "the photo moved {moved} points {when}: its corners were at {before:?} and are at {now:?}");
+    };
+
+    harness.event(egui::Event::PointerMoved(grab));
+    harness.step();
+    harness.event(egui::Event::PointerButton { pos: grab, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    harness.step();
+    // Across the photo's edge (at 0, 0) and out into the room beyond it, a step at a time.
+    for (x, y) in [(16.0, 10.0), (6.0, 4.0), (1.0, 1.0), (-1.0, -1.0), (-6.0, -4.0), (-14.0, -10.0), (-20.0, -15.0)] {
+        harness.event(egui::Event::PointerMoved(at(x, y)));
+        harness.step();
+        harness.step();
+        same(&harness, &format!("with the corner dragged to ({x}, {y})"));
+    }
+    // The corner did go out there.
+    assert!(harness.query_all_by_label_contains("Top-left corner, -20, -15").next().is_some(), "the corner is not at (-20, -15)");
+    harness.event(egui::Event::PointerButton {
+        pos: at(-20.0, -15.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.step();
+    same(&harness, "once the corner was let go outside it");
+
+    // And back in again: still where it was.
+    let grab = centre_of(&harness, "Top-left corner, -20, -15");
+    harness.event(egui::Event::PointerMoved(grab));
+    harness.step();
+    harness.event(egui::Event::PointerButton { pos: grab, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    harness.step();
+    for (x, y) in [(-8.0, -6.0), (-1.0, -1.0), (2.0, 2.0), (24.0, 16.0)] {
+        harness.event(egui::Event::PointerMoved(at(x, y)));
+        harness.step();
+        harness.step();
+        same(&harness, &format!("with the corner dragged back to ({x}, {y})"));
+    }
+    harness.event(egui::Event::PointerButton {
+        pos: at(24.0, 16.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    same(&harness, "once the corner was back on the photo");
+    let _ = std::fs::remove_dir_all(&dir);
+}

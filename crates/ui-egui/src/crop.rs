@@ -46,10 +46,11 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     }
     let mut zoom_and_pan = state.canvas_view;
     canvas::navigate(ui, rect, &background, &mut zoom_and_pan);
-    // The room around the photo for a corner that has left it is there only while one has: until
-    // then the photo takes everything the area has.
-    let margin = if a_corner_is_off_the_photo(crop) { canvas::VIRTUAL_MARGIN } else { 0.0 };
-    let canvas = Canvas::with_view(rect, &display, crop.photo_size, zoom_and_pan, margin);
+    // The room for a corner that has left the photo is always set aside, drawn or not. The photo's
+    // size and place must not depend on where the corners are: a corner is put on the photo's edge
+    // with care, and a photo that shrinks or shifts as the corner crosses it, whether by the mouse,
+    // an arrow key, Undo or Use Whole Photo, moves the target away from the hand.
+    let canvas = Canvas::with_view(rect, &display, crop.photo_size, zoom_and_pan, canvas::VIRTUAL_MARGIN);
     state.canvas_view = canvas.view;
     // Pointer and keyboard first; the loupe is held open by whatever handle is pressed now.
     state.loupe.held = false;
