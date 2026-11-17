@@ -87,6 +87,14 @@ fn click(harness: &mut Harness<Shell>, label: &str) {
     harness.step();
 }
 
+/// The number, from 1, of the page that is open. The first page to be read opens, and with several
+/// photos and several workers that is not always the first photo's: a test must not assume it is.
+fn open_number(harness: &Harness<Shell>) -> usize {
+    let view = harness.state().engine.view();
+    let open = view.enhance.as_ref().map(|e| e.page).expect("a page is open");
+    view.tray.iter().position(|t| t.page == open).expect("the open page is in the tray") + 1
+}
+
 fn shell(dir: &std::path::Path) -> Harness<'static, Shell> {
     let quad = Quad([Point::new(24.0, 16.0), Point::new(136.0, 16.0), Point::new(136.0, 104.0), Point::new(24.0, 104.0)]);
     let services = Services { detector: Some(Arc::new(Finder(quad))), recognizer: None, upright: None };
@@ -170,9 +178,10 @@ fn crop_a_page_delete_it_and_take_the_delete_back() {
     assert_eq!(before, after, "Done changed the pages");
 
     // Delete says so, with an Undo, and the Undo brings the page back.
+    let open = open_number(&harness);
     click(&mut harness, "Delete");
     until(&mut harness, "the page to go", |h| shown_text(h).contains("2 pages"));
-    assert!(shown_text(&harness).contains("Page 1 deleted"), "{}", shown_text(&harness));
+    assert!(shown_text(&harness).contains(&format!("Page {open} deleted")), "{}", shown_text(&harness));
     click(&mut harness, "Undo");
     until(&mut harness, "the page to come back", |h| shown_text(h).contains("3 pages"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -189,10 +198,13 @@ fn several_pages_are_selected_rotated_and_deleted_together_and_one_undo_brings_t
     harness.state_mut().engine.dispatch(Command::ImportAdd { paths }).expect("the import starts");
     until(&mut harness, "the pages", |h| h.query_all_by_label("Page 4").next().is_some() && !h.state().engine.view().busy);
 
-    // Select the second and the third page with Command-click, and turn them together.
+    // Select two pages besides the open one with Command-click, and turn the three together.
+    let open = open_number(&harness);
+    let clicked: Vec<usize> = (1..=4).filter(|n| *n != open).take(2).collect();
+    let selected = [open - 1, clicked[0] - 1, clicked[1] - 1];
     let modifiers = egui::Modifiers { command: true, mac_cmd: true, ..egui::Modifiers::NONE };
-    for label in ["Page 2", "Page 3"] {
-        let bounds = harness.query_all_by_label(label).last().and_then(|n| n.accesskit_node().raw_bounds()).expect("the page's bounds");
+    for label in clicked.iter().map(|n| format!("Page {n}")) {
+        let bounds = harness.query_all_by_label(&label).last().and_then(|n| n.accesskit_node().raw_bounds()).expect("the page's bounds");
         let pos = egui::pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
         harness.event(egui::Event::ModifiersChanged(modifiers));
         harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers });
@@ -201,14 +213,22 @@ fn several_pages_are_selected_rotated_and_deleted_together_and_one_undo_brings_t
         harness.step();
         harness.step();
     }
-    // The open page (the first) is in the selection it was added to: three pages.
+    // The open page is in the selection it was added to: three pages.
     assert!(shown_text(&harness).contains("3 pages selected"), "{}", shown_text(&harness));
     let turns = |h: &Harness<Shell>| h.state().engine.session().file().pages.iter().map(|p| p.quarter_turns).collect::<Vec<_>>();
     let before = turns(&harness);
     click(&mut harness, "Rotate Right");
     let after = turns(&harness);
-    assert_eq!((after[0], after[1], after[2]), ((before[0] + 1) % 4, (before[1] + 1) % 4, (before[2] + 1) % 4));
-    assert_eq!(after[3], before[3], "a page that was not selected was turned");
+    for index in 0..4 {
+        let expected = if selected.contains(&index) { (before[index] + 1) % 4 } else { before[index] };
+        assert_eq!(
+            after[index],
+            expected,
+            "page {} was {}",
+            index + 1,
+            if selected.contains(&index) { "not turned" } else { "turned, and was not selected" }
+        );
+    }
 
     // Delete the three, in one step; one Undo brings them back.
     click(&mut harness, "Delete");

@@ -197,7 +197,9 @@ pub struct GatedHalfTurn {
 impl UprightVoter for GatedHalfTurn {
     fn vote(&self, _: &Gray8) -> Result<UprightVote, ServiceError> {
         if let Ok(gate) = self.gate.lock() {
-            let _ = gate.recv_timeout(Duration::from_secs(20));
+            // Long, so that a slow machine finishes the other work first: the wait ends when the
+            // test releases the gate, or drops it, which it does however it ends.
+            let _ = gate.recv_timeout(Duration::from_secs(300));
         }
         Ok(UprightVote { score: [0.0, 0.0, 10.0, 0.0], chars: [0, 0, 100, 0] })
     }

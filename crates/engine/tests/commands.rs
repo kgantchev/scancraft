@@ -487,10 +487,14 @@ fn the_automatic_turn_is_kept_when_the_flattening_finishes_before_it() {
     let (release, gate) = std::sync::mpsc::channel();
     let mut services = services(quad);
     services.upright = Some(Arc::new(GatedHalfTurn { gate: std::sync::Mutex::new(gate) }));
-    let mut engine = open_with(dir.path(), "Scan A", services, 2);
+    // One worker: the jobs run in the order they were queued, the flattening first, and the
+    // voter holds the only worker. With two, a worker waiting inside the flattening's parallel
+    // work could pick up the held job and block there, with the flattening beneath it.
+    let mut engine = open_with(dir.path(), "Scan A", services, 1);
     let path = write(&dir, "flat.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // About a second on a free machine; the limit is only there to end a hang.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while engine.session().file().pages.first().is_none_or(|p| p.sheet.is_none()) {
         assert!(std::time::Instant::now() < end, "the flattening never came back");
         engine.poll();
