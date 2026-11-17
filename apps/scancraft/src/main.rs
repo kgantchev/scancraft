@@ -14,6 +14,8 @@ use scancraft_ui_egui::{ScanCraftUi, Settings, UiAction};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+mod window;
+
 /// What the app does when a panel answers.
 #[derive(Debug, Clone)]
 enum PanelAction {
@@ -34,6 +36,8 @@ struct App {
     quit_prompt: bool,
     /// The user chose to quit although an export is running.
     quit_confirmed: bool,
+    /// Where the window is and how big, for the next launch.
+    window: window::Memory,
 }
 
 impl App {
@@ -226,7 +230,13 @@ impl eframe::App for App {
         craft_quit::on_close_request(ctx);
     }
 
+    fn on_exit(&mut self) {
+        // The window's place is written on the way out, whatever the last moment looked like.
+        self.window.save();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.window.track(ui.ctx());
         self.ui.set_settings(ui_settings(&self.engine));
         self.ui.ui(ui, &mut self.engine);
         self.panels(ui, frame);
@@ -330,14 +340,17 @@ fn services() -> Services {
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/scancraft-256.png");
 
 fn main() -> ExitCode {
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_min_inner_size([860.0, 600.0]);
+    // The window opens where it was and how big it was.
+    let window = window::Memory::open();
+    let mut viewport = window.viewport();
     match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
         Ok(icon) => viewport = viewport.with_icon(icon),
         // A missing icon is not worth refusing to start for.
         Err(e) => eprintln!("ScanCraft couldn't read its icon: {e}"),
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let root = scancraft_engine::settings::path_from_setting(&scancraft_ui_egui::state::default_session_storage());
+    // The scans folder chosen in Settings, else the default: the first scan of a launch goes there too.
+    let root = scancraft_engine::settings::configured_sessions_dir(craft_settings::Location::Auto);
     let engine = start_engine(&root, services());
     let result = eframe::run_native(
         "ScanCraft",
@@ -350,7 +363,7 @@ fn main() -> ExitCode {
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
             };
-            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake), quit_prompt: false, quit_confirmed: false }))
+            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake), quit_prompt: false, quit_confirmed: false, window }))
         }),
     );
     match result {
