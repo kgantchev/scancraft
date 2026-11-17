@@ -361,6 +361,20 @@ fn services() -> Services {
     }
 }
 
+/// The native menu bar, installed once, on the main thread, in the creator closure. Only macOS has
+/// one (`craft_menu::mac` is not built elsewhere); on other systems the window has no native menu
+/// and the app is driven by its toolbar and keyboard, so there is nothing to hand back.
+#[cfg(target_os = "macos")]
+fn install_menu(ctx: &egui::Context) -> Option<craft_menu::NativeMenu> {
+    let bar = scancraft_ui_egui::build_menu_bar(&scancraft_ui_egui::fake_engine::empty_view());
+    craft_menu::mac::install(ctx, &bar)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_menu(_ctx: &egui::Context) -> Option<craft_menu::NativeMenu> {
+    None
+}
+
 /// The app icon at 256 px, with a transparent margin outside its rounded corners. It sets the Dock
 /// and window icon when the app runs unbundled; the packaged app takes `assets/ScanCraft.icns`.
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/scancraft-256.png");
@@ -382,9 +396,7 @@ fn main() -> ExitCode {
         "ScanCraft",
         options,
         Box::new(move |cc| {
-            // The menu bar is installed once, on the main thread, in the creator closure.
-            let bar = scancraft_ui_egui::build_menu_bar(&scancraft_ui_egui::fake_engine::empty_view());
-            let menu = craft_menu::mac::install(&cc.egui_ctx, &bar);
+            let menu = install_menu(&cc.egui_ctx);
             let wake: craft_dialogs::Wake = {
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())

@@ -19,7 +19,9 @@ const INCREASE_CONTRAST: [(&str, &str); 2] =
     [("com.apple.Accessibility", "EnhancedBackgroundContrastEnabled"), ("com.apple.universalaccess", "increaseContrast")];
 
 /// What `defaults read` printed, as on or off; `None` when it is neither (the key is not there,
-/// and `defaults` says so on its error output and prints nothing here).
+/// and `defaults` says so on its error output and prints nothing here). Only the macOS reader calls
+/// it, so elsewhere it is built for the tests alone.
+#[cfg(any(target_os = "macos", test))]
 pub fn parse_flag(output: &str) -> Option<bool> {
     match output.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" => Some(true),
