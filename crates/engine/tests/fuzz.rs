@@ -97,6 +97,12 @@ impl Fuzz {
                 return Command::PageSetLookAll { look, strength: self.rng.below(256) as u8 };
             }
             231..=240 => return Command::ExportCancel,
+            241..=250 => return Command::PageRotateMany { pages: vec![self.page(), self.page()], quarter_turns: self.rng.below(256) as u8 as i8 },
+            251..=255 => return Command::PageDeleteMany { pages: vec![self.page(), self.page()] },
+            256..=265 => {
+                let look = self.pick(&[Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument]);
+                return Command::PageSetLookMany { pages: vec![self.page(), self.page()], look, strength: self.rng.below(256) as u8 };
+            }
             _ => {}
         }
         match self.rng.below(23) {

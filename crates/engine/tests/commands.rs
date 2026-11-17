@@ -474,6 +474,92 @@ fn the_original_preview_does_not_depend_on_the_number_of_threads() {
     assert!(pictures[0] == pictures[1], "one thread and eight threads made different pictures");
 }
 
+// ---- several pages at once ----
+
+fn engine_with_four_pages(dir: &TempDir) -> (scancraft_engine::Engine, Vec<PageId>) {
+    let mut engine = open(dir, services(desk_quad()));
+    for seed in 0..4 {
+        import_desk(&mut engine, dir, seed);
+    }
+    let ids = engine.view().tray.iter().map(|t| t.page).collect();
+    (engine, ids)
+}
+
+#[test]
+fn a_look_for_the_selected_pages_changes_those_pages_in_one_undo_step() {
+    let dir = TempDir::new("look-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let looks = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| (p.look, p.strength)).collect::<Vec<_>>();
+    let before = looks(&engine);
+    // Named out of order, one twice: the pages are changed once each.
+    engine.dispatch(Command::PageSetLookMany { pages: vec![ids[2], ids[0], ids[2]], look: Look::Grayscale, strength: 33 }).unwrap();
+    let after = looks(&engine);
+    assert_eq!(after[0], (Look::Grayscale, 33));
+    assert_eq!(after[2], (Look::Grayscale, 33));
+    assert_eq!((after[1], after[3]), (before[1], before[3]), "a page that was not selected changed");
+    // A look with no strength has none, whatever was asked.
+    engine.dispatch(Command::PageSetLookMany { pages: vec![ids[1]], look: Look::Original, strength: 80 }).unwrap();
+    assert_eq!(looks(&engine)[1], (Look::Original, 0));
+    engine.dispatch(Command::EditUndo).unwrap();
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(looks(&engine), before, "two undos take both batches back");
+}
+
+#[test]
+fn the_selected_pages_are_turned_together_and_one_undo_turns_them_back() {
+    let dir = TempDir::new("rotate-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    settle(&mut engine);
+    let turns = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| p.quarter_turns).collect::<Vec<_>>();
+    let before = turns(&engine);
+    engine.dispatch(Command::PageRotateMany { pages: vec![ids[1], ids[3]], quarter_turns: 1 }).unwrap();
+    let after = turns(&engine);
+    assert_eq!(after[1], (before[1] + 1) % 4);
+    assert_eq!(after[3], (before[3] + 1) % 4);
+    assert_eq!((after[0], after[2]), (before[0], before[2]));
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(turns(&engine), before);
+    settle(&mut engine);
+}
+
+#[test]
+fn the_selected_pages_are_deleted_together_and_the_window_is_not_left_empty() {
+    let dir = TempDir::new("delete-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let before = engine.view();
+    engine.dispatch(Command::PageDeleteMany { pages: vec![ids[0], ids[2]] }).unwrap();
+    let view = engine.view();
+    assert_eq!(view.tray.iter().map(|t| t.page).collect::<Vec<_>>(), vec![ids[1], ids[3]]);
+    // The photos of the deleted pages went with them, and what is open is a page that is left.
+    assert_eq!(engine.session().file().photos.len(), 2);
+    assert!(matches!(view.screen, Screen::Enhance(p) if view.tray.iter().any(|t| t.page == p)), "{:?}", view.screen);
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(engine.view().tray, before.tray, "one undo brings every page back");
+    // All of them is allowed, and is the one way to the empty window.
+    engine.dispatch(Command::PageDeleteMany { pages: ids.clone() }).unwrap();
+    assert!(engine.view().tray.is_empty());
+    assert_eq!(engine.view().screen, Screen::Import);
+}
+
+#[test]
+fn a_batch_that_names_a_page_that_is_not_there_changes_nothing() {
+    let dir = TempDir::new("batch-refused");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let before = engine.view();
+    let pages = engine.session().file().pages.clone();
+    for command in [
+        Command::PageRotateMany { pages: vec![ids[0], PageId(9999)], quarter_turns: 1 },
+        Command::PageDeleteMany { pages: vec![PageId(9999), ids[1]] },
+        Command::PageSetLookMany { pages: vec![ids[0], PageId(9999)], look: Look::BlackWhite, strength: 50 },
+        Command::PageRotateMany { pages: vec![], quarter_turns: 1 },
+        Command::PageDeleteMany { pages: vec![] },
+    ] {
+        assert!(engine.dispatch(command.clone()).is_err(), "{command:?} was accepted");
+    }
+    assert_eq!(engine.session().file().pages, pages, "a refused batch changed a page");
+    assert_eq!(engine.view().tray, before.tray);
+}
+
 // ---- Screen 2 ----
 
 #[test]
@@ -1140,6 +1226,19 @@ fn a_new_session_starts_empty_in_its_own_folder_and_keeps_the_old_one() {
     // The new session works.
     import_desk(&mut engine, &dir, 9);
     assert!(matches!(engine.view().screen, Screen::Crop(_)));
+}
+
+#[test]
+fn a_new_scans_folder_is_used_by_the_next_new_scan() {
+    let dir = TempDir::new("scans-folder");
+    let elsewhere = TempDir::new("scans-folder-elsewhere");
+    let mut engine = engine_with_photo(&dir);
+    let chosen = elsewhere.path().to_string_lossy().into_owned();
+    engine.set_settings(|s| s.sessions_dir = Some(chosen));
+    engine.dispatch(Command::SessionNew).unwrap();
+    assert_eq!(engine.session_dir().parent(), Some(elsewhere.path()), "the new scan is not in the folder that was chosen");
+    // The scan that was open stays where it was.
+    assert!(dir.path().join("Scan A").join("session.json").is_file());
 }
 
 #[test]

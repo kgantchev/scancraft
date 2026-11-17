@@ -105,11 +105,9 @@ impl Engine {
             Command::ExportPdf { path, options } => self.export_pdf_command(path, options),
             Command::SessionNew => self.session_new(),
             Command::SessionRestore => self.session_restore(),
-            // The contract has these (several pages selected in the sidebar); the engine does
-            // not do them yet. They answer with an error the interface can show, and change nothing.
-            Command::PageSetLookMany { .. } | Command::PageRotateMany { .. } | Command::PageDeleteMany { .. } => {
-                Err(EngineError::msg("That isn't available yet."))
-            }
+            Command::PageSetLookMany { pages, look, strength } => self.page_set_look_many(pages, *look, *strength),
+            Command::PageRotateMany { pages, quarter_turns } => self.page_rotate_many(pages, *quarter_turns),
+            Command::PageDeleteMany { pages } => self.page_delete_many(pages),
             Command::ExportCancel => self.export_cancel(),
             // Handled before the snapshot is taken.
             Command::EditUndo | Command::EditRedo => Ok(()),
@@ -698,6 +696,54 @@ impl Engine {
             page.strength = strength;
         }
         self.last_look = look;
+        Ok(())
+    }
+
+    /// The pages a batch command names, each once, in the order of the document. Every one has to
+    /// be in the document, or the batch is refused whole: it never does half of what was asked.
+    fn batch_pages(&self, pages: &[PageId]) -> Result<Vec<PageId>, EngineError> {
+        if pages.is_empty() {
+            return Err(EngineError::msg("Select at least one page."));
+        }
+        // A list longer than any document can only be junk.
+        if pages.len() > 4 * MAX_PAGES {
+            return Err(EngineError::msg("That is more pages than a scan holds."));
+        }
+        let wanted: std::collections::HashSet<PageId> = pages.iter().copied().collect();
+        for id in &wanted {
+            self.session.page(*id).ok_or(EngineError::NoPage(*id))?;
+        }
+        Ok(self.session.file().pages.iter().filter(|p| wanted.contains(&p.id)).map(|p| p.id).collect())
+    }
+
+    /// The same look and strength on the selected pages, as one step.
+    fn page_set_look_many(&mut self, pages: &[PageId], look: Look, strength: u8) -> Result<(), EngineError> {
+        let ids = self.batch_pages(pages)?;
+        let strength = if look.default_strength().is_some() { strength.min(100) } else { 0 };
+        for id in ids {
+            if let Some(page) = self.session.page_mut(id) {
+                page.look = look;
+                page.strength = strength;
+            }
+            self.page_failures.remove(&id);
+        }
+        self.last_look = look;
+        Ok(())
+    }
+
+    /// The selected pages turned, as one step.
+    fn page_rotate_many(&mut self, pages: &[PageId], quarter_turns: i8) -> Result<(), EngineError> {
+        for id in self.batch_pages(pages)? {
+            self.page_rotate(id, quarter_turns)?;
+        }
+        Ok(())
+    }
+
+    /// The selected pages deleted, as one step.
+    fn page_delete_many(&mut self, pages: &[PageId]) -> Result<(), EngineError> {
+        for id in self.batch_pages(pages)? {
+            self.page_delete(id)?;
+        }
         Ok(())
     }
 

@@ -317,6 +317,14 @@ impl Engine {
     /// Changes the settings; they are written shortly after.
     pub fn set_settings(&mut self, f: impl FnOnce(&mut Settings)) {
         self.settings.update(f);
+        // A new scans folder takes effect at once: the next new scan is made there, and the last
+        // unfinished scan is looked for there. The scan that is open stays where it is.
+        let chosen = self.settings.get().sessions_dir.as_deref().map(crate::settings::path_from_setting);
+        if let Some(root) = chosen.filter(|root| *root != self.root) {
+            self.restore_offer =
+                session::list_sessions(&root).into_iter().find(|s| !s.exported && s.pages > 0 && s.dir != *self.session.dir()).map(|s| s.pages);
+            self.root = root;
+        }
     }
 
     /// Replaces the clock the undo coalescing and the save interval read, in milliseconds (for tests).
