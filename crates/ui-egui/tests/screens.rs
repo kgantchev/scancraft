@@ -2143,3 +2143,101 @@ fn a_long_scan_asks_the_engine_for_the_thumbnails_of_the_pages_in_view_only() {
     let asked = asked.len();
     assert!(asked > 0 && asked < 12, "{asked} thumbnails were asked for in a window that shows about four pages");
 }
+
+// ------------------------------------------------------------------ the settings
+
+/// A window with the Settings window open, on a scans folder of the test's own.
+fn settings_open() -> Harness<'static, TestState> {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    let settings = scancraft_ui_egui::Settings { session_storage: "/Users/me/Scans".to_owned(), ..scancraft_ui_egui::Settings::default() };
+    let (ui, engine) = harness.state_mut();
+    ui.set_settings(settings);
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::SETTINGS), engine);
+    harness.run();
+    harness
+}
+
+#[test]
+fn the_settings_are_in_groups() {
+    let harness = settings_open();
+    let text = shown_text(&harness);
+    for group in ["PAGES", "SCANNING", "TEXT", "BOOKS", "SCANS FOLDER"] {
+        assert!(text.contains(group), "the Settings window has no {group:?} group: {text}");
+    }
+}
+
+#[test]
+fn each_switch_has_a_line_under_it_that_says_what_it_does() {
+    let harness = settings_open();
+    for (switch, line) in [
+        ("Snap to standard paper sizes", "made exactly that size"),
+        ("Rotate pages upright automatically", "reads the right way up"),
+        ("Flatten curved pages automatically", "straighter"),
+        ("Keep paper colour", "stays tinted"),
+        ("Language correction in text recognition", "a search finds them"),
+    ] {
+        let switch_bounds = bounds_of(&harness, switch);
+        let explanation = harness.query_all_by_label_contains(line).next().unwrap_or_else(|| panic!("no explanation with {line:?} under {switch:?}"));
+        let raw = explanation.accesskit_node().raw_bounds().expect("the explanation has bounds");
+        // Directly under the switch, not above it and not a group away.
+        assert!(
+            raw.y0 as f32 >= switch_bounds.max.y - 2.0 && (raw.y0 as f32) < switch_bounds.max.y + 24.0,
+            "{switch:?}: {raw:?} against {switch_bounds:?}"
+        );
+    }
+    // The choices have theirs too.
+    let text = shown_text(&harness);
+    for line in ["not close to any standard size", "the two pages of a spread are read in"] {
+        assert!(text.contains(line), "no line saying {line:?}: {text}");
+    }
+}
+
+#[test]
+fn a_switch_in_settings_sends_the_changed_settings_to_the_shell() {
+    let mut harness = settings_open();
+    let before = scancraft_ui_egui::Settings::default().keep_paper_colour;
+    click_label(&mut harness, "Keep paper colour");
+    let actions = harness.state_mut().0.take_actions();
+    let [UiAction::SettingsChanged(settings)] = actions.as_slice() else { panic!("the switch asked for {actions:?}") };
+    assert_eq!(settings.keep_paper_colour, !before);
+    // Nothing else about the settings changed.
+    assert_eq!(settings.session_storage, "/Users/me/Scans");
+}
+
+#[test]
+fn the_scans_folder_is_shown_and_choose_asks_the_shell_for_the_folder_panel() {
+    let mut harness = settings_open();
+    assert!(shown_text(&harness).contains("/Users/me/Scans"), "{}", shown_text(&harness));
+    click_label(&mut harness, "Choose…");
+    assert_eq!(harness.state_mut().0.take_actions(), vec![UiAction::ChooseScansFolder]);
+}
+
+/// The Settings window over the finished page, in one appearance.
+fn settings_snapshot(theme_choice: egui::Theme, name: &str) {
+    let mut harness = harness(enhance_view(), theme_choice);
+    harness.run();
+    let settings = scancraft_ui_egui::Settings {
+        session_storage: "~/Library/Application Support/ScanCraft/Sessions".to_owned(),
+        default_paper: scancraft_core::recipe::Paper::UsLetter,
+        ..scancraft_ui_egui::Settings::default()
+    };
+    let (ui, engine) = harness.state_mut();
+    ui.set_settings(settings);
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::SETTINGS), engine);
+    harness.run();
+    if !can_render(&mut harness) {
+        return;
+    }
+    harness.snapshot_options(name, &snapshot_options());
+}
+
+#[test]
+fn settings_light_snapshot() {
+    settings_snapshot(egui::Theme::Light, "settings_light");
+}
+
+#[test]
+fn settings_dark_snapshot() {
+    settings_snapshot(egui::Theme::Dark, "settings_dark");
+}

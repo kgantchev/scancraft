@@ -160,72 +160,131 @@ pub fn export_sheet(ctx: &egui::Context, state: &mut UiState, view: &ViewState, 
     }
 }
 
-/// The Settings window (§4.6).
+/// A switch with a line under it that says what it does, in words a person who has never opened
+/// Settings can follow. Returns whether it was changed.
+fn switch(ui: &mut Ui, state: &UiState, value: &mut bool, label: &str, explanation: &str) -> bool {
+    let changed = ui.checkbox(value, state.text.t(label)).changed();
+    // Under the switch, in the same column as its label, in a smaller and quieter type.
+    ui.horizontal(|ui| {
+        ui.add_space(26.0);
+        ui.add(egui::Label::new(egui::RichText::new(state.text.t(explanation)).small().color(ui.visuals().weak_text_color())).wrap());
+    });
+    ui.add_space(6.0);
+    changed
+}
+
+/// A choice between a few named values, with its explanation under it.
+fn choice<T: Copy + PartialEq>(ui: &mut Ui, state: &UiState, value: &mut T, label: &str, options: &[(T, String)], explanation: &str) -> bool {
+    let mut changed = false;
+    ui.label(state.text.t(label));
+    ui.horizontal_wrapped(|ui| {
+        for (option, name) in options {
+            if ui.selectable_label(*value == *option, name.as_str()).clicked() && *value != *option {
+                *value = *option;
+                changed = true;
+            }
+        }
+    });
+    ui.add(egui::Label::new(egui::RichText::new(state.text.t(explanation)).small().color(ui.visuals().weak_text_color())).wrap());
+    ui.add_space(6.0);
+    changed
+}
+
+/// The Settings window (§4.6): the settings in groups, each with a line under it saying what it
+/// does, and a button for the folder the scans are kept in.
 pub fn settings_window(ctx: &egui::Context, state: &mut UiState) {
     let mut open = state.settings_open;
     let mut changed = false;
     let mut settings = state.settings.clone();
-    egui::Window::new(state.text.t("Settings")).open(&mut open).resizable(false).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(state.text.t("Default paper"));
-            for paper in [Paper::IsoA(4), Paper::UsLetter, Paper::UsLegal, Paper::IsoA(5)] {
-                let name = state.text.t(paper_name(paper));
-                if ui.selectable_label(settings.default_paper == paper, name).clicked() {
-                    settings.default_paper = paper;
-                    changed = true;
+    egui::Window::new(state.text.t("Settings"))
+        .open(&mut open)
+        .resizable(false)
+        .default_width(440.0)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.viewport_rect().center())
+        .show(ctx, |ui| {
+            ui.set_width(420.0);
+            // Pages.
+            crate::theme::section_heading(ui, &state.text.t("Pages"));
+            let papers: Vec<(Paper, String)> =
+                [Paper::IsoA(4), Paper::UsLetter, Paper::UsLegal, Paper::IsoA(5)].into_iter().map(|p| (p, state.text.t(paper_name(p)))).collect();
+            changed |= choice(
+                ui,
+                state,
+                &mut settings.default_paper,
+                "Default paper",
+                &papers,
+                "The size of a page that is not close to any standard size, such as a receipt or a page cut from a larger sheet.",
+            );
+            changed |= switch(
+                ui,
+                state,
+                &mut settings.snap_to_paper_sizes,
+                "Snap to standard paper sizes",
+                "A page that is close to a standard size, such as A4 or US Letter, is made exactly that size.",
+            );
+            // Scanning.
+            crate::theme::section_heading(ui, &state.text.t("Scanning"));
+            changed |= switch(
+                ui,
+                state,
+                &mut settings.rotate_upright_automatically,
+                "Rotate pages upright automatically",
+                "Turns a page so that its text reads the right way up. You can turn it back from the page's own note.",
+            );
+            changed |= switch(
+                ui,
+                state,
+                &mut settings.flatten_curved_pages_automatically,
+                "Flatten curved pages automatically",
+                "Flattens a bent page, as a page of a book is, when that makes its lines of text straighter.",
+            );
+            changed |= switch(
+                ui,
+                state,
+                &mut settings.keep_paper_colour,
+                "Keep paper colour",
+                "Tinted paper stays tinted in the PDF, instead of being made white.",
+            );
+            // Text.
+            crate::theme::section_heading(ui, &state.text.t("Text"));
+            changed |= switch(
+                ui,
+                state,
+                &mut settings.language_correction,
+                "Language correction in text recognition",
+                "Uses the language of the page to correct words that were read wrongly, so a search finds them.",
+            );
+            // Books.
+            crate::theme::section_heading(ui, &state.text.t("Books"));
+            let orders = vec![(PageOrder::LeftToRight, state.text.t("Left to right")), (PageOrder::RightToLeft, state.text.t("Right to left"))];
+            changed |= choice(
+                ui,
+                state,
+                &mut settings.book_page_order,
+                "Book page order",
+                &orders,
+                "The order the two pages of a spread are read in, and so the order they take in the PDF.",
+            );
+            // Where the scans are kept.
+            crate::theme::section_heading(ui, &state.text.t("Scans folder"));
+            ui.horizontal(|ui| {
+                if ui.button(state.text.t("Choose…")).clicked() {
+                    state.actions.push(crate::state::UiAction::ChooseScansFolder);
                 }
-            }
+                ui.add(egui::Label::new(egui::RichText::new(settings.session_storage.clone()).monospace().small()).truncate());
+            });
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        state.text.t("New scans are kept here. A scan you have not exported can be continued from the empty window."),
+                    )
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                )
+                .wrap(),
+            );
         });
-        ui.horizontal(|ui| {
-            let mut snap = settings.snap_to_paper_sizes;
-            if ui.checkbox(&mut snap, state.text.t("Snap to standard paper sizes")).changed() {
-                settings.snap_to_paper_sizes = snap;
-                changed = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut rotate = settings.rotate_upright_automatically;
-            if ui.checkbox(&mut rotate, state.text.t("Rotate pages upright automatically")).changed() {
-                settings.rotate_upright_automatically = rotate;
-                changed = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut flatten = settings.flatten_curved_pages_automatically;
-            if ui.checkbox(&mut flatten, state.text.t("Flatten curved pages automatically")).changed() {
-                settings.flatten_curved_pages_automatically = flatten;
-                changed = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(state.text.t("Book page order"));
-            for (order, name) in [(PageOrder::LeftToRight, "Left to right"), (PageOrder::RightToLeft, "Right to left")] {
-                let name = state.text.t(name);
-                if ui.selectable_label(settings.book_page_order == order, name).clicked() {
-                    settings.book_page_order = order;
-                    changed = true;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut correction = settings.language_correction;
-            if ui.checkbox(&mut correction, state.text.t("Language correction in text recognition")).changed() {
-                settings.language_correction = correction;
-                changed = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut colour = settings.keep_paper_colour;
-            if ui.checkbox(&mut colour, state.text.t("Keep paper colour")).changed() {
-                settings.keep_paper_colour = colour;
-                changed = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(state.text.t("Session storage"));
-            ui.label(settings.session_storage.clone());
-        });
-    });
     state.settings_open = open;
     if changed {
         state.settings = settings.clone();

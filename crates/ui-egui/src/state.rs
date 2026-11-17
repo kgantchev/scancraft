@@ -175,6 +175,8 @@ pub enum UiAction {
     SettingsChanged(Settings),
     /// Open the folder panel for the reference set the labels are written to (§10.2).
     ChooseLabelFolder,
+    /// Open the folder panel for the folder the scans are kept in (§4.6).
+    ChooseScansFolder,
     /// Show a file in the Finder.
     RevealInFinder { path: String },
     /// Open a file with the program the system has for it.

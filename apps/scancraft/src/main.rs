@@ -14,6 +14,7 @@ use scancraft_ui_egui::{ScanCraftUi, Settings, UiAction};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+mod quit;
 mod window;
 
 /// What the app does when a panel answers.
@@ -25,6 +26,10 @@ enum PanelAction {
     Export { options: ExportOptions },
     /// The folder panel answered with the folder of the reference set the labels go to.
     LabelFolder,
+    /// The folder panel answered with the folder the scans are kept in.
+    ScansFolder,
+    /// The alert about quitting during an export was answered.
+    QuitDuringExport,
 }
 
 struct App {
@@ -32,8 +37,10 @@ struct App {
     engine: Engine,
     menu: Option<craft_menu::NativeMenu>,
     panels: Dialogs<PanelAction>,
-    /// The "Cancel Export or Keep Exporting" question is showing (§4.8).
+    /// The alert "Cancel Export or Keep Exporting" has to be asked (§4.8).
     quit_prompt: bool,
+    /// The alert is on screen, so it is not asked a second time.
+    quit_asked: bool,
     /// The user chose to quit although an export is running.
     quit_confirmed: bool,
     /// Where the window is and how big, for the next launch.
@@ -104,6 +111,10 @@ impl App {
                     let dialog = FileDialog::folder().title("Choose the reference set's folder");
                     self.panels.ask(dialog, PanelAction::LabelFolder);
                 }
+                UiAction::ChooseScansFolder => {
+                    let dialog = FileDialog::folder().title("Choose where scans are kept");
+                    self.panels.ask(dialog, PanelAction::ScansFolder);
+                }
                 UiAction::OpenSettings | UiAction::ShowAbout => {
                     // The interface opens its own windows.
                 }
@@ -152,6 +163,24 @@ impl App {
                         self.ui.set_label_folder(folder.to_string_lossy().into_owned());
                     }
                 }
+                (PanelAction::ScansFolder, Answer::Paths(paths)) => {
+                    // The next new scan is made there, and the settings file remembers it.
+                    if let Some(folder) = paths.first() {
+                        let chosen = folder.to_string_lossy().into_owned();
+                        self.engine.set_settings(|current| current.sessions_dir = Some(chosen));
+                    }
+                }
+                (PanelAction::QuitDuringExport, answer) => {
+                    self.quit_asked = false;
+                    if let Answer::Unavailable(why) = &answer {
+                        self.ui.notice(format!("The question about quitting could not be asked: {why}"), true);
+                    }
+                    if quit::decide(&answer) == quit::Decision::Quit {
+                        self.quit_confirmed = true;
+                        let _ = self.engine.dispatch(Command::ExportCancel);
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
                 _ => {}
             }
         }
@@ -161,32 +190,17 @@ impl App {
 }
 
 impl App {
-    /// "A PDF is being written. Cancel the export, or keep exporting?" (§4.8).
-    fn quit_question(&mut self, ctx: &egui::Context) {
+    /// "A PDF is still being written": asked once, by the system, while an export is running and
+    /// the user has tried to quit (§4.8).
+    fn ask_about_quitting(&mut self) {
         if !self.quit_prompt {
             return;
         }
-        if !self.engine.is_exporting() {
-            self.quit_prompt = false;
-            return;
+        self.quit_prompt = false;
+        if self.engine.is_exporting() && !self.quit_asked {
+            self.quit_asked = true;
+            self.panels.ask_message(quit::question(), PanelAction::QuitDuringExport);
         }
-        egui::Window::new("Quit during an export").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-            ctx,
-            |ui| {
-                ui.label("A PDF is still being written.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Keep Exporting").clicked() {
-                        self.quit_prompt = false;
-                    }
-                    if ui.button("Cancel Export").clicked() {
-                        self.quit_prompt = false;
-                        self.quit_confirmed = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-            },
-        );
     }
 }
 
@@ -239,8 +253,8 @@ impl eframe::App for App {
         self.window.track(ui.ctx());
         self.ui.set_settings(ui_settings(&self.engine));
         self.ui.ui(ui, &mut self.engine);
+        self.ask_about_quitting();
         self.panels(ui, frame);
-        self.quit_question(ui.ctx());
     }
 }
 
@@ -363,7 +377,16 @@ fn main() -> ExitCode {
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
             };
-            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake), quit_prompt: false, quit_confirmed: false, window }))
+            Ok(Box::new(App {
+                ui: ScanCraftUi::new(),
+                engine,
+                menu,
+                panels: Dialogs::new(wake),
+                quit_prompt: false,
+                quit_asked: false,
+                quit_confirmed: false,
+                window,
+            }))
         }),
     );
     match result {
