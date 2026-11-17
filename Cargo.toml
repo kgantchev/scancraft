@@ -41,6 +41,10 @@ craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "600fc7161
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
 craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", features = ["egui"] }
 craft-i18n = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6" }
+# Where the window was and how big, remembered between launches (`window.json` beside `config.toml`).
+# The `restore` feature is the store and the placement rules, with no egui. Licence: MIT OR Apache-2.0,
+# the same as every craft-libs crate here.
+craft-window = { git = "https://github.com/storytold/craft-libs", rev = "600fc71614b316d8c2c7bd793c62f228a5b2e5b6", features = ["restore"] }
 
 # PDF writing (specification §5.3): pdf-writer, with the text layer ported from PdfCraft in
 # scancraft-io.
