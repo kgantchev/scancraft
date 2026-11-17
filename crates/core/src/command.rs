@@ -64,8 +64,14 @@ pub enum Command {
     /// Puts the same look and strength on every page of the document, as one undo step.
     #[serde(rename = "page.set_look_all")]
     PageSetLookAll { look: Look, strength: u8 },
+    /// Puts the same look and strength on the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.set_look_many")]
+    PageSetLookMany { pages: Vec<PageId>, look: Look, strength: u8 },
     #[serde(rename = "page.rotate")]
     PageRotate { page: PageId, quarter_turns: i8 },
+    /// Turns the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.rotate_many")]
+    PageRotateMany { pages: Vec<PageId>, quarter_turns: i8 },
     #[serde(rename = "page.add")]
     PageAdd { page: PageId },
     /// The user has looked at a page flagged `PageState::NeedsLook` and it is right as it is: the
@@ -74,6 +80,9 @@ pub enum Command {
     PageMarkReviewed { page: PageId },
     #[serde(rename = "page.delete")]
     PageDelete { page: PageId },
+    /// Deletes the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.delete_many")]
+    PageDeleteMany { pages: Vec<PageId> },
     #[serde(rename = "page.move")]
     PageMove { from: u32, to: u32 },
     #[serde(rename = "page.edit")]
@@ -120,10 +129,13 @@ impl Command {
         "page.set_look",
         "page.set_strength",
         "page.set_look_all",
+        "page.set_look_many",
         "page.rotate",
+        "page.rotate_many",
         "page.add",
         "page.mark_reviewed",
         "page.delete",
+        "page.delete_many",
         "page.move",
         "page.edit",
         "page.open_crop",
@@ -187,6 +199,21 @@ mod tests {
     }
 
     #[test]
+    fn the_batch_commands_for_selected_pages_parse_and_are_listed() {
+        let rotate = Command::from_json(r#"{"id":"page.rotate_many","params":{"pages":[1,3],"quarter_turns":-1}}"#).unwrap();
+        assert_eq!(rotate, Command::PageRotateMany { pages: vec![PageId(1), PageId(3)], quarter_turns: -1 });
+        let delete = Command::from_json(r#"{"id":"page.delete_many","params":{"pages":[2]}}"#).unwrap();
+        assert_eq!(delete, Command::PageDeleteMany { pages: vec![PageId(2)] });
+        let look = Command::from_json(r#"{"id":"page.set_look_many","params":{"pages":[4,5],"look":"BlackWhite","strength":55}}"#).unwrap();
+        assert_eq!(look, Command::PageSetLookMany { pages: vec![PageId(4), PageId(5)], look: Look::BlackWhite, strength: 55 });
+        for id in ["page.rotate_many", "page.delete_many", "page.set_look_many"] {
+            assert!(Command::IDS.contains(&id), "{id} is not in the list of ids");
+        }
+        // The pages are part of the command: without them there is nothing to act on.
+        assert!(Command::from_json(r#"{"id":"page.delete_many","params":{}}"#).is_err());
+    }
+
+    #[test]
     fn every_command_serialises_to_an_id_in_the_list_and_every_id_has_a_command() {
         use crate::recipe::{ExportOptions, FlattenMode, PhotoId};
         let p = Point::new(1.0, 2.0);
@@ -207,10 +234,13 @@ mod tests {
             Command::PageSetLook { page: PageId(1), look: Look::Original },
             Command::PageSetStrength { page: PageId(1), value: 1 },
             Command::PageSetLookAll { look: Look::Original, strength: 1 },
+            Command::PageSetLookMany { pages: vec![PageId(1)], look: Look::Original, strength: 1 },
             Command::PageRotate { page: PageId(1), quarter_turns: 1 },
+            Command::PageRotateMany { pages: vec![PageId(1)], quarter_turns: 1 },
             Command::PageAdd { page: PageId(1) },
             Command::PageMarkReviewed { page: PageId(1) },
             Command::PageDelete { page: PageId(1) },
+            Command::PageDeleteMany { pages: vec![PageId(1)] },
             Command::PageMove { from: 0, to: 1 },
             Command::PageEdit { page: PageId(1) },
             Command::PageOpenCrop { page: PageId(1) },

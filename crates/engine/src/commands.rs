@@ -105,6 +105,11 @@ impl Engine {
             Command::ExportPdf { path, options } => self.export_pdf_command(path, options),
             Command::SessionNew => self.session_new(),
             Command::SessionRestore => self.session_restore(),
+            // The contract has these (several pages selected in the sidebar); the engine does
+            // not do them yet. They answer with an error the interface can show, and change nothing.
+            Command::PageSetLookMany { .. } | Command::PageRotateMany { .. } | Command::PageDeleteMany { .. } => {
+                Err(EngineError::msg("That isn't available yet."))
+            }
             Command::ExportCancel => self.export_cancel(),
             // Handled before the snapshot is taken.
             Command::EditUndo | Command::EditRedo => Ok(()),
