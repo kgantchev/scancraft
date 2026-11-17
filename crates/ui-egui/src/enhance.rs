@@ -31,6 +31,9 @@ pub fn enhance_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine
     };
     let area = ui.available_rect_before_wrap();
     let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
+    // The canvas has a name, so the keyboard's focus on it is announced and not silent.
+    let name = state.text.t("Page");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, name.clone()));
     if state.enhance_canvas_of != Some(enhance.page) {
         state.enhance_canvas_view = crate::state::CanvasView::default();
         state.enhance_canvas_of = Some(enhance.page);

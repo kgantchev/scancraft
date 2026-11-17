@@ -31,6 +31,9 @@ pub fn crop_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &
     let area = ui.available_rect_before_wrap();
     // The canvas's own widget goes first, so the handles, made after it, are above it.
     let (rect, background) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
+    // The canvas has a name, so the keyboard's focus on it is announced and not silent.
+    let name = state.text.t("Photo");
+    background.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, name.clone()));
     let display = engine.image(scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo));
     let Some(display) = display else {
         theme::canvas_background(ui, rect);

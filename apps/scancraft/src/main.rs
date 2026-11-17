@@ -14,6 +14,7 @@ use scancraft_ui_egui::{ScanCraftUi, Settings, UiAction};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+mod accessibility;
 mod quit;
 mod window;
 
@@ -45,6 +46,8 @@ struct App {
     quit_confirmed: bool,
     /// Where the window is and how big, for the next launch.
     window: window::Memory,
+    /// Reads Reduce Motion and Increase Contrast from the system (§4.9).
+    accessibility: accessibility::Refresh,
 }
 
 impl App {
@@ -213,6 +216,15 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _ = frame;
+        // Reduce Motion and Increase Contrast, read when the window comes to the front.
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        if let Some(found) = self.accessibility.step(focused, wake, accessibility::read) {
+            self.ui.set_accessibility(found);
+        }
         if scancraft_core::engine_api::EngineApi::poll(&mut self.engine) {
             ctx.request_repaint();
         }
@@ -386,6 +398,7 @@ fn main() -> ExitCode {
                 quit_asked: false,
                 quit_confirmed: false,
                 window,
+                accessibility: accessibility::Refresh::new(),
             }))
         }),
     );

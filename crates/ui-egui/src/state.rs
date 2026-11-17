@@ -231,6 +231,8 @@ pub struct UiState {
     pub toolbar_more: bool,
     /// The sheet over the window for the export.
     pub export_sheet: ExportSheet,
+    /// The system's Reduce Motion and Increase Contrast.
+    pub accessibility: Accessibility,
     /// The last export's summary the sheet has shown, so a new one is told from an old one.
     pub summary_seen: Option<scancraft_core::engine_api::ExportSummary>,
     /// The export options popover is open.
@@ -273,6 +275,17 @@ pub struct UiState {
     pub theme: Option<egui::Theme>,
 }
 
+/// The system's accessibility settings that change how the interface draws (§4.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Accessibility {
+    /// Reduce Motion: nothing fades or spins that does not have to. A toast stays as it is until it
+    /// goes, and a spinner does not turn.
+    pub reduce_motion: bool,
+    /// Increase Contrast: the outlines and handles drawn over the photo are thicker, with a
+    /// darker edge, so they stand out from any paper.
+    pub increase_contrast: bool,
+}
+
 /// How many messages are kept at once; the oldest goes when there are more.
 pub const MAX_NOTICES: usize = 8;
 /// How long a message that is not an error stays on the screen, in seconds.
@@ -303,9 +316,10 @@ impl Toast {
         !self.error && self.shown_at.is_some_and(|at| now - at >= TOAST_SECONDS)
     }
 
-    /// How opaque it is at `now`: 1 until the last moments, then fading to 0.
-    pub fn opacity(&self, now: f64) -> f32 {
-        if self.error {
+    /// How opaque it is at `now`: 1 until the last moments, then fading to 0. With Reduce Motion it
+    /// does not fade: it is 1 until it goes.
+    pub fn opacity(&self, now: f64, reduce_motion: bool) -> f32 {
+        if self.error || reduce_motion {
             return 1.0;
         }
         match self.shown_at {
@@ -335,6 +349,7 @@ impl UiState {
             show_original: false,
             toolbar_more: false,
             export_sheet: ExportSheet::Closed,
+            accessibility: Accessibility::default(),
             summary_seen: None,
             export_popover: false,
             settings_open: false,
@@ -507,16 +522,18 @@ mod tests {
     fn an_error_stays_until_it_is_closed() {
         let t = toast(true);
         assert!(!t.expired(100.0 + 3600.0));
-        assert_eq!(t.opacity(100.0 + 3600.0), 1.0);
+        assert_eq!(t.opacity(100.0 + 3600.0, false), 1.0);
     }
 
     #[test]
     fn a_short_message_fades_over_its_last_moments() {
         let t = toast(false);
-        assert_eq!(t.opacity(101.0), 1.0);
-        let fading = t.opacity(104.7);
+        assert_eq!(t.opacity(101.0, false), 1.0);
+        let fading = t.opacity(104.7, false);
         assert!(fading > 0.0 && fading < 1.0, "{fading}");
-        assert_eq!(t.opacity(105.0), 0.0);
+        assert_eq!(t.opacity(105.0, false), 0.0);
+        // With Reduce Motion it does not fade: it stays whole until it goes.
+        assert_eq!(t.opacity(104.7, true), 1.0);
     }
 
     #[test]

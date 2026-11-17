@@ -168,6 +168,22 @@ pub fn click(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, 
     prune_selection(state, view);
 }
 
+/// Moves a page one place earlier or later in the document, for the keyboard and a screen reader,
+/// which cannot drag. Does nothing at either end.
+pub fn move_page(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, page: PageId, later: bool) {
+    let Some(from) = view.tray.iter().position(|item| item.page == page) else { return };
+    let to = if later { from + 1 } else { from.wrapping_sub(1) };
+    if to < view.tray.len() {
+        dispatch(state, engine, Command::PageMove { from: from as u32, to: to as u32 });
+    }
+}
+
+/// Whether a page has a place to move to, one earlier or later.
+pub fn can_move(view: &ViewState, page: PageId, later: bool) -> bool {
+    let Some(at) = view.tray.iter().position(|item| item.page == page) else { return false };
+    if later { at + 1 < view.tray.len() } else { at > 0 }
+}
+
 /// Opens a page in the view the window is in.
 pub fn open_page(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, page: PageId) {
     match mode_of(view) {
@@ -236,7 +252,8 @@ fn draw_thumbnail(ui: &mut Ui, state: &mut UiState, item: &TrayItem, thumb_box: 
     };
     if selected {
         let accent = theme::accent(ui.visuals().dark_mode);
-        painter.rect_stroke(shown.expand(2.0), 3.0, egui::Stroke::new(3.0, accent), egui::StrokeKind::Middle);
+        let width = 3.0 + theme::extra_width(ui.ctx());
+        painter.rect_stroke(shown.expand(2.0), 3.0, egui::Stroke::new(width, accent), egui::StrokeKind::Middle);
     }
     // The number goes inside the picture, on a dark chip.
     let galley = painter.layout_no_wrap(item.number.to_string(), egui::FontId::proportional(11.0), Color32::WHITE);
@@ -342,6 +359,16 @@ fn handle_page(
         if !several && needs_look(item) && ui.button(state.text.t("This Page Is Fine")).clicked() {
             dispatch(state, engine, Command::PageMarkReviewed { page });
             ui.close();
+        }
+        if !several {
+            if ui.add_enabled(can_move(view, page, false), egui::Button::new(state.text.t("Move Up"))).clicked() {
+                move_page(state, view, engine, page, false);
+                ui.close();
+            }
+            if ui.add_enabled(can_move(view, page, true), egui::Button::new(state.text.t("Move Down"))).clicked() {
+                move_page(state, view, engine, page, true);
+                ui.close();
+            }
         }
         let delete = if several { state.text.trn(selection.len() as u64, "Delete {n} Page", "Delete {n} Pages") } else { state.text.t("Delete") };
         if ui.button(delete).clicked() {

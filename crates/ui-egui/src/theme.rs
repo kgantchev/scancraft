@@ -233,12 +233,41 @@ pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     ui.add_enabled(enabled, button)
 }
 
+/// Tells the drawing code what the system's accessibility settings are. They are kept in the
+/// context, so each window of a test has its own.
+pub fn set_accessibility(ctx: &Context, accessibility: crate::state::Accessibility) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::NULL, accessibility));
+}
+
+/// The accessibility settings last given to [`set_accessibility`]; none are on before that.
+pub fn accessibility(ctx: &Context) -> crate::state::Accessibility {
+    ctx.data(|data| data.get_temp(egui::Id::NULL)).unwrap_or_default()
+}
+
+/// The dark line under the outline, handles and the lens's lines: wider and darker with Increase
+/// Contrast, so it shows on paper of any colour.
+pub fn halo_stroke(ctx: &Context) -> Stroke {
+    if accessibility(ctx).increase_contrast { Stroke::new(HALO_WIDTH + 3.0, Color32::from_black_alpha(215)) } else { Stroke::new(HALO_WIDTH, HALO) }
+}
+
+/// The line of the page outline: thicker with Increase Contrast.
+pub fn outline_stroke(ctx: &Context, colour: Color32) -> Stroke {
+    Stroke::new(if accessibility(ctx).increase_contrast { OUTLINE_WIDTH + 1.5 } else { OUTLINE_WIDTH }, colour)
+}
+
+/// How much thicker a ring or a line is drawn with Increase Contrast, in points.
+pub fn extra_width(ctx: &Context) -> f32 {
+    if accessibility(ctx).increase_contrast { 1.5 } else { 0.0 }
+}
+
 /// A spinner: three quarters of a ring that turns, drawn in `rect` in `colour`.
 ///
 /// It asks for a frame twenty times a second, not for every frame as egui's own does, so a
-/// waiting screen does not keep the processor busy.
+/// waiting screen does not keep the processor busy. With Reduce Motion it does not turn, and asks
+/// for no frames: the ring is the picture of "working" and the words beside it say the rest.
 pub fn spinner(ui: &Ui, rect: egui::Rect, colour: Color32) {
-    let time = ui.input(|i| i.time);
+    let still = accessibility(ui.ctx()).reduce_motion;
+    let time = if still { 0.0 } else { ui.input(|i| i.time) };
     let radius = (rect.width().min(rect.height()) / 2.0 - 1.5).max(1.0);
     let start = (time * std::f64::consts::TAU * 0.9) as f32;
     let points: Vec<egui::Pos2> = (0..=24)
@@ -248,7 +277,9 @@ pub fn spinner(ui: &Ui, rect: egui::Rect, colour: Color32) {
         })
         .collect();
     ui.painter().add(egui::Shape::line(points, Stroke::new(2.0, colour)));
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    if !still {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
 }
 
 /// A small drawn icon at the head of a toast: a red disc with an exclamation mark for an error, a

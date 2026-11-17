@@ -359,8 +359,9 @@ fn draw_outlines(painter: &Painter, lens: &Lens, crop: &CropView) {
     for (path, colour) in paths {
         let points: Vec<Pos2> = path.iter().map(|p| lens.point(*p)).collect();
         for piece in pieces_in_ring(&points, lens.centre, CROSSHAIR_GAP, RADIUS - 1.0) {
-            painter.add(Shape::line(piece.clone(), Stroke::new(LINE_HALO, theme::HALO)));
-            painter.add(Shape::line(piece, Stroke::new(LINE_WIDTH, colour)));
+            let more = theme::extra_width(painter.ctx());
+            painter.add(Shape::line(piece.clone(), Stroke::new(LINE_HALO + more, theme::halo_stroke(painter.ctx()).color)));
+            painter.add(Shape::line(piece, Stroke::new(LINE_WIDTH + more / 2.0, colour)));
         }
     }
 }

@@ -29,6 +29,8 @@ pub const ZOOM_IN: &str = "view.zoom_in";
 pub const ZOOM_OUT: &str = "view.zoom_out";
 pub const ZOOM_FIT: &str = "view.zoom_fit";
 pub const SELECT_ALL: &str = "edit.select_all";
+pub const MOVE_UP: &str = "page.move_up";
+pub const MOVE_DOWN: &str = "page.move_down";
 /// The command of the app's own Quit item, which `craft-quit` runs.
 pub const QUIT: &str = craft_quit::QUIT_MENU_ID;
 
@@ -162,6 +164,9 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
     )));
     page_items.push(Node::Item(item(page_command("page.rotate", page, serde_json::json!({ "quarter_turns": -1 })), "Rotate Left", "Cmd+L")));
     page_items.push(Node::Item(item(page_command("page.rotate", page, serde_json::json!({ "quarter_turns": 1 })), "Rotate Right", "Cmd+R")));
+    // The ways to reorder that need no mouse: the sidebar's drag has these as its alternative.
+    page_items.push(Node::Item(item(CommandRef::new(MOVE_UP), "Move Page Up", "Cmd+Alt+Up")));
+    page_items.push(Node::Item(item(CommandRef::new(MOVE_DOWN), "Move Page Down", "Cmd+Alt+Down")));
     let filter_page = view.enhance.as_ref().map(|e| e.page);
     page_items.push(Node::Submenu {
         label: "Filter".to_owned(),
@@ -259,6 +264,8 @@ pub fn item_enabled(id: &str, view: &ViewState) -> bool {
         "export.pdf" | EXPORT_OPTIONS | "page.set_look_all" => has_pages,
         "page.delete" | "page.rotate" => sidebar::current_page(view).is_some(),
         SELECT_ALL => view.tray.len() >= 2,
+        MOVE_UP => sidebar::current_page(view).is_some_and(|page| sidebar::can_move(view, page, false)),
+        MOVE_DOWN => sidebar::current_page(view).is_some_and(|page| sidebar::can_move(view, page, true)),
         "crop.auto" => view.crop.as_ref().is_some_and(|crop| !crop.auto_detect),
         "crop.full_image" | "crop.split" | "crop.set_flatten" | LABEL_REFERENCE => on_crop,
         "page.open_crop" | "page.set_look" => on_enhance,
@@ -303,6 +310,11 @@ pub fn handle_menu_command(command: &CommandRef, state: &mut UiState, view: &Vie
         }
         "export.pdf" => state.start_export(),
         SELECT_ALL => sidebar::select_all(state, view),
+        MOVE_UP | MOVE_DOWN => {
+            if let Some(page) = sidebar::current_page(view) {
+                sidebar::move_page(state, view, engine, page, command.id == MOVE_DOWN);
+            }
+        }
         // The pages selected together, or the open page: the menu acts on what the buttons do.
         "page.delete" => {
             let pages = sidebar::targets(state, view);

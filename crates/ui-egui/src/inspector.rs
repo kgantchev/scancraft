@@ -38,6 +38,11 @@ pub fn inspector(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mu
 fn filter_inspector(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else { return };
     let page = enhance.page;
+    // Two things the canvas needs from the controls below: whether the slider has the keys, and
+    // whether Show Original is held. The canvas is made before the inspector (it comes earlier in
+    // the keyboard's walk), so it reads what the last frame set.
+    state.keys_taken = false;
+    state.show_original = false;
     let title = state.text.t("Filter");
     ui.heading(title);
     // With several pages selected, the filters are for all of them: say so.

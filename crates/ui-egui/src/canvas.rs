@@ -572,8 +572,8 @@ pub fn draw_outline(painter: &Painter, canvas: &Canvas, outline: &OutlineView) {
         return;
     }
     let canvas_points: Vec<Pos2> = points.iter().map(|p| canvas.photo_to_canvas(*p)).collect();
-    painter.add(Shape::line(canvas_points.clone(), Stroke::new(theme::HALO_WIDTH, theme::HALO)));
-    painter.add(Shape::line(canvas_points, Stroke::new(theme::OUTLINE_WIDTH, colour)));
+    painter.add(Shape::line(canvas_points.clone(), theme::halo_stroke(painter.ctx())));
+    painter.add(Shape::line(canvas_points, theme::outline_stroke(painter.ctx(), colour)));
     // When the page will be flattened, the curved outline it will be cut along is drawn too, thin
     // and dashed, so Flatten shows what it does before the page is finished.
     if let Some(fitted) = outline.fitted.as_ref().filter(|line| line.len() >= 3 && outline.invalid.is_none()) {
@@ -817,18 +817,23 @@ pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Comman
 
 /// Draws a ring around a handle the keyboard has selected, so it can be told from the rest.
 fn selection_ring(painter: &Painter, position: Pos2, radius: f32) {
-    painter.circle_stroke(position, radius + 7.0, Stroke::new(4.0, theme::HALO));
+    painter.circle_stroke(position, radius + 7.0, Stroke::new(4.0 + theme::extra_width(painter.ctx()), theme::halo_stroke(painter.ctx()).color));
     painter.circle_stroke(position, radius + 7.0, Stroke::new(1.5, theme::HANDLE));
 }
 
 /// Draws a round handle: a white dot in a cyan ring over a dark halo. While it is held it is a
 /// ring only, so the corner it marks shows through (§4.3).
 fn round_handle(painter: &Painter, position: Pos2, radius: f32, held: bool) {
-    painter.circle_stroke(position, radius + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING + 2.0, theme::HALO));
+    let extra = theme::extra_width(painter.ctx());
+    painter.circle_stroke(
+        position,
+        radius + theme::CORNER_RING / 2.0,
+        Stroke::new(theme::CORNER_RING + 2.0 + extra, theme::halo_stroke(painter.ctx()).color),
+    );
     if !held {
         painter.circle_filled(position, radius, theme::HANDLE);
     }
-    painter.circle_stroke(position, radius + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
+    painter.circle_stroke(position, radius + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING + extra, theme::SCAN_CYAN));
     if held {
         painter.circle_stroke(position, radius - 1.0, Stroke::new(1.5, theme::HANDLE));
     }
@@ -840,7 +845,8 @@ fn pill(painter: &Painter, position: Pos2, along: Vec2) {
     let width = theme::EDGE_HANDLE.x;
     let reach = (length - width) / 2.0;
     let (a, b) = (position - along * reach, position + along * reach);
-    for (extra, colour) in [(5.0, theme::HALO), (3.0, theme::SCAN_CYAN), (0.0, theme::HANDLE)] {
+    let more = theme::extra_width(painter.ctx());
+    for (extra, colour) in [(5.0 + more, theme::halo_stroke(painter.ctx()).color), (3.0 + more / 2.0, theme::SCAN_CYAN), (0.0, theme::HANDLE)] {
         let w = width + extra;
         painter.line_segment([a, b], Stroke::new(w, colour));
         painter.circle_filled(a, w / 2.0, colour);
@@ -892,10 +898,10 @@ fn draw_spine(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &UiState) {
     let painter = ui.painter_at(canvas.area);
     let a = canvas.photo_to_canvas(spine[0]);
     let b = canvas.photo_to_canvas(spine[1]);
-    for shape in Shape::dashed_line(&[a, b], Stroke::new(theme::HALO_WIDTH, theme::HALO), 6.0, 4.0) {
+    for shape in Shape::dashed_line(&[a, b], theme::halo_stroke(painter.ctx()), 6.0, 4.0) {
         painter.add(shape);
     }
-    for shape in Shape::dashed_line(&[a, b], Stroke::new(theme::OUTLINE_WIDTH, theme::SCAN_CYAN), 6.0, 4.0) {
+    for shape in Shape::dashed_line(&[a, b], theme::outline_stroke(painter.ctx(), theme::SCAN_CYAN), 6.0, 4.0) {
         painter.add(shape);
     }
     for (index, point) in spine.iter().enumerate() {

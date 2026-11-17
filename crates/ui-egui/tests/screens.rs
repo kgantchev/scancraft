@@ -2368,3 +2368,212 @@ fn the_menus_rotate_and_delete_act_on_the_selection_too() {
     ui.run_menu_command(&rotate.command, engine);
     assert_eq!(dispatched(&harness), vec![Command::PageRotateMany { pages: vec![PAGE, PageId(12)], quarter_turns: -1 }]);
 }
+
+// ------------------------------------------------------------- the keyboard's walk
+
+/// The name of the widget that has the keyboard's focus, if one does.
+fn focused_name(harness: &Harness<TestState>) -> Option<String> {
+    harness.root().children_recursive().find(|node| node.accesskit_node().is_focused()).and_then(|node| node.accesskit_node().label())
+}
+
+#[test]
+fn the_tab_key_walks_the_toolbar_then_the_pages_then_the_canvas_then_the_inspector_then_the_status_bar() {
+    let mut view = enhance_view();
+    // A flagged page, so the status bar has a button to reach.
+    view.tray[2].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::NotFound);
+    let mut harness = harness(view, egui::Theme::Light);
+    harness.run();
+    let mut walk: Vec<String> = Vec::new();
+    for _ in 0..80 {
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        if let Some(name) = focused_name(&harness) {
+            // The slider and its number box have one name; the walk has come full circle at the first stop.
+            if walk.len() > 3 && walk.first() == Some(&name) {
+                break;
+            }
+            if walk.last() != Some(&name) {
+                walk.push(name);
+            }
+        }
+    }
+    let at = |name: &str| walk.iter().position(|w| w == name).unwrap_or_else(|| panic!("the walk never reached {name:?}: {walk:?}"));
+    let (toolbar, pages, canvas, inspector, status) = (at("Add"), at("Page 1"), at("Page"), at("Original filter"), at("Show"));
+    assert!(toolbar < pages && pages < canvas && canvas < inspector && inspector < status, "the walk is {walk:?}");
+}
+
+#[test]
+fn a_page_can_be_moved_without_dragging_it() {
+    // The sidebar's drag has a keyboard and screen-reader way: the Page menu's Move Page Up and Down.
+    let mut middle = enhance_view();
+    middle.enhance.as_mut().expect("the enhance view").page = PageId(11);
+    let mut harness = harness(middle.clone(), egui::Theme::Light);
+    harness.run();
+    let (ui, engine) = harness.state_mut();
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::MOVE_UP), engine);
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::MOVE_DOWN), engine);
+    assert_eq!(dispatched(&harness), vec![Command::PageMove { from: 1, to: 0 }, Command::PageMove { from: 1, to: 2 }]);
+    // At the ends there is nowhere to go, and the items say so.
+    use scancraft_ui_egui::menu::item_enabled;
+    assert!(item_enabled("page.move_up", &middle) && item_enabled("page.move_down", &middle));
+    assert!(!item_enabled("page.move_up", &enhance_view()), "the first page can be moved up");
+    let mut last = enhance_view();
+    last.enhance.as_mut().expect("the enhance view").page = PageId(12);
+    assert!(!item_enabled("page.move_down", &last), "the last page can be moved down");
+    let bar = scancraft_ui_egui::build_menu_bar(&enhance_view());
+    let labels: Vec<&str> = bar.items().iter().map(|i| i.label.as_str()).collect();
+    assert!(labels.contains(&"Move Page Up") && labels.contains(&"Move Page Down"));
+}
+
+// ----------------------------------------------------------- reduce motion, contrast
+
+/// The points of the first line the frame painted, for comparing one frame with the next.
+fn first_line<S>(harness: &Harness<'_, S>) -> Option<Vec<egui::Pos2>> {
+    painted(harness).into_iter().find_map(|shape| match shape {
+        egui::Shape::Path(path) => Some(path.points),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_spinner_turns_unless_reduce_motion_is_on() {
+    for (reduce_motion, turns) in [(false, true), (true, false)] {
+        let mut harness = Harness::builder().with_size(egui::vec2(100.0, 100.0)).build_ui(move |ui| {
+            scancraft_ui_egui::theme::set_accessibility(ui.ctx(), scancraft_ui_egui::Accessibility { reduce_motion, increase_contrast: false });
+            let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(30.0), egui::Sense::hover());
+            scancraft_ui_egui::theme::spinner(ui, rect, egui::Color32::WHITE);
+        });
+        harness.step();
+        let before = first_line(&harness).expect("the spinner's ring");
+        harness.step();
+        harness.step();
+        let after = first_line(&harness).expect("the spinner's ring");
+        assert_eq!(before != after, turns, "with Reduce Motion {reduce_motion} the spinner {}", if turns { "did not turn" } else { "turned" });
+    }
+}
+
+/// The widths of the lines the crop view drew over the photo.
+fn line_widths(harness: &Harness<TestState>) -> Vec<f32> {
+    painted(harness)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Path(path) => match path.stroke.color {
+                egui::epaint::ColorMode::Solid(colour) if colour == scancraft_ui_egui::theme::SCAN_CYAN => Some(path.stroke.width),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn increase_contrast_thickens_the_outline_and_darkens_its_edge() {
+    let mut normal = harness(crop_view(), egui::Theme::Light);
+    normal.run();
+    let widest_normal = line_widths(&normal).into_iter().fold(0.0f32, f32::max);
+    let mut high = harness(crop_view(), egui::Theme::Light);
+    high.state_mut().0.set_accessibility(scancraft_ui_egui::Accessibility { reduce_motion: false, increase_contrast: true });
+    high.run();
+    let widest_high = line_widths(&high).into_iter().fold(0.0f32, f32::max);
+    assert!(widest_normal > 0.0, "no outline was drawn");
+    assert!(widest_high > widest_normal + 0.9, "the outline is {widest_high} wide with Increase Contrast and {widest_normal} without");
+    // The edge under it is darker, too.
+    let darkest = |h: &Harness<TestState>| {
+        painted(h)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Path(path) => match path.stroke.color {
+                    egui::epaint::ColorMode::Solid(c) if c.r() == 0 && c.g() == 0 && c.b() == 0 && path.stroke.width >= 4.0 => Some(c.a()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    assert!(darkest(&high) > darkest(&normal), "the edge under the outline is no darker: {} against {}", darkest(&high), darkest(&normal));
+}
+
+// ------------------------------------------------------------- the names
+
+/// Every state of the workspace a control can be in, as the views the engine would report.
+fn every_view() -> Vec<(&'static str, ViewState)> {
+    let mut flagged = enhance_view();
+    flagged.tray[0].state = PageState::NeedsLook(scancraft_core::engine_api::ReviewReason::LowScore);
+    flagged.tray[1].state = PageState::Preparing;
+    flagged.tray[2].state = PageState::Failed("the file is gone".to_owned());
+    let mut reading = enhance_view();
+    reading.importing = Some(scancraft_core::engine_api::Progress { done: 1, total: 4 });
+    reading.reading_text = Some(scancraft_core::engine_api::Progress { done: 0, total: 3 });
+    let mut running = enhance_view();
+    running.exporting = Some(scancraft_core::engine_api::Progress { done: 1, total: 3 });
+    let mut finished = enhance_view();
+    finished.last_export = Some(scancraft_core::engine_api::ExportSummary { path: "/tmp/Scan.pdf".to_owned(), pages: 3, bytes: 2_000_000 });
+    let mut split = crop_view();
+    let crop = split.crop.as_mut().expect("the crop view");
+    let mut right = crop.outlines[0].clone();
+    right.page = PageId(2);
+    right.half = Some(Half::Right);
+    crop.outlines[0].half = Some(Half::Left);
+    crop.outlines.push(right);
+    crop.spine = Some([Point::new(600.0, 0.0), Point::new(600.0, 900.0)]);
+    let mut bent = crop_view();
+    bent.crop.as_mut().expect("the crop view").outlines[0].sides[Side::Top.index()] =
+        SideShape::Bent { handles: [Point::new(400.0, 70.0), Point::new(600.0, 60.0), Point::new(800.0, 55.0)] };
+    vec![
+        ("the empty window", import_view()),
+        ("crop", crop_view()),
+        ("crop on a split photo", split),
+        ("crop with a bent side", bent),
+        ("the finished page", enhance_view()),
+        ("pages that need a look, are preparing or failed", flagged),
+        ("photos being read", reading),
+        ("the export running", running),
+        ("the export finished", finished),
+    ]
+}
+
+#[test]
+fn every_control_in_every_view_has_an_accessible_name() {
+    for (name, view) in every_view() {
+        for theme_choice in [egui::Theme::Light, egui::Theme::Dark] {
+            let mut harness = harness(view.clone(), theme_choice);
+            harness.step();
+            harness.run();
+            assert!(harness.unnamed_widgets().is_empty(), "{name}, {theme_choice:?}: unnamed widgets: {:?}", harness.unnamed_widgets());
+        }
+    }
+}
+
+#[test]
+fn the_settings_window_the_selection_and_the_narrow_toolbar_have_names_too() {
+    // Settings.
+    let mut settings = settings_open();
+    assert!(settings.unnamed_widgets().is_empty(), "Settings: {:?}", settings.unnamed_widgets());
+    // Several pages selected, with a toast over the window.
+    let mut selecting = harness(enhance_view(), egui::Theme::Light);
+    selecting.run();
+    click_label_with(&mut selecting, "Page 3", COMMAND);
+    click_label(&mut selecting, "Delete");
+    assert!(selecting.unnamed_widgets().is_empty(), "a selection and a toast: {:?}", selecting.unnamed_widgets());
+    // The toolbar's menu, open.
+    let engine = FakeEngine::with_view(enhance_view()).with_image(ImageKey::LookPreview(PAGE), picture(600, 450));
+    let mut narrow = harness_sized(engine, egui::Theme::Light, egui::vec2(480.0, 700.0));
+    narrow.run();
+    click_label(&mut narrow, "More");
+    assert!(narrow.unnamed_widgets().is_empty(), "the toolbar's menu: {:?}", narrow.unnamed_widgets());
+    let _ = &mut settings;
+}
+
+#[test]
+fn a_toast_is_announced_by_a_screen_reader_when_it_appears() {
+    // News is said politely, an error at once.
+    for (error, expected) in [(false, egui::accesskit::Live::Polite), (true, egui::accesskit::Live::Assertive)] {
+        let mut harness = harness(enhance_view(), egui::Theme::Light);
+        harness.run();
+        harness.state_mut().0.notice("Something happened", error);
+        harness.run();
+        let node = harness.query_all_by_label("Something happened").next().expect("the toast");
+        assert_eq!(node.accesskit_node().data().live(), Some(expected), "error {error}");
+    }
+}

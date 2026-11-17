@@ -30,7 +30,7 @@ use scancraft_core::engine_api::{EngineApi, Notice, ViewState};
 
 pub use fake_engine::FakeEngine;
 pub use menu::{build_menu_bar, menu_state};
-pub use state::{Settings, UiAction, UiState};
+pub use state::{Accessibility, Settings, UiAction, UiState};
 
 /// The whole interface. The app calls [`ScanCraftUi::ui`] once per frame.
 pub struct ScanCraftUi {
@@ -46,13 +46,12 @@ impl ScanCraftUi {
     /// Draws one frame into the window's root `ui`.
     pub fn ui(&mut self, ui: &mut egui::Ui, engine: &mut dyn EngineApi) {
         self.apply_theme(ui.ctx());
+        theme::set_accessibility(ui.ctx(), self.state.accessibility);
         let view = engine.view();
         // The export options hang from the Export button, which is there only while there are pages.
         if view.tray.is_empty() {
             self.state.export_popover = false;
         }
-        self.state.keys_taken = false;
-        self.state.show_original = false;
         sidebar::prune_selection(&mut self.state, &view);
         self.take_engine_notices(&view);
         self.track_export(&view);
@@ -61,6 +60,8 @@ impl ScanCraftUi {
         if workspace {
             self.workspace(ui, &view, engine);
         } else {
+            self.state.keys_taken = false;
+            self.state.show_original = false;
             egui::CentralPanel::default().show(ui, |ui| import::import_screen(ui, &mut self.state, &view, engine));
         }
         // Files can be dropped on the window at any time, whatever it is showing.
@@ -88,39 +89,42 @@ impl ScanCraftUi {
 
     /// The workspace: the toolbar along the top, the pages on the left, the inspector on the
     /// right, the status bar along the bottom, and the page in the middle.
+    ///
+    /// The regions are laid out by rectangle, not as panels, because of the order the widgets are
+    /// made in: it is the order the Tab key walks them, and for a keyboard or a screen reader the
+    /// order is toolbar, pages, canvas, inspector, status bar. Panels would make the canvas last.
     fn workspace(&mut self, ui: &mut egui::Ui, view: &ViewState, engine: &mut dyn EngineApi) {
-        egui::Panel::top("scancraft.toolbar").exact_size(toolbar::HEIGHT).resizable(false).show_separator_line(true).frame(egui::Frame::NONE).show(
-            ui,
-            |ui| {
-                toolbar::toolbar(ui, &mut self.state, view, engine);
-            },
-        );
-        egui::Panel::bottom("scancraft.status")
-            .exact_size(statusbar::HEIGHT)
-            .resizable(false)
-            .show_separator_line(true)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                statusbar::status_bar(ui, &mut self.state, view, engine);
-            });
-        if !self.state.sidebar_hidden {
-            craft_ui::direction::start_panel(ui, "scancraft.pages")
-                .exact_size(sidebar::WIDTH)
-                .resizable(false)
-                .show_separator_line(true)
-                .frame(egui::Frame::NONE)
-                .show(ui, |ui| sidebar::sidebar(ui, &mut self.state, view, engine));
+        let full = ui.max_rect();
+        let rtl = craft_ui::direction::is_rtl(&*ui);
+        let toolbar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), toolbar::HEIGHT));
+        let status_rect = egui::Rect::from_min_max(egui::pos2(full.min.x, full.max.y - statusbar::HEIGHT), full.max);
+        let body = egui::Rect::from_min_max(egui::pos2(full.min.x, toolbar_rect.max.y), egui::pos2(full.max.x, status_rect.min.y));
+        let sidebar_width = if self.state.sidebar_hidden { 0.0 } else { sidebar::WIDTH };
+        let inspector_width = if self.state.inspector_hidden || (view.crop.is_none() && view.enhance.is_none()) { 0.0 } else { inspector::WIDTH };
+        // The pages are at the reading start of the window and the inspector at its end.
+        let (left_width, right_width) = if rtl { (inspector_width, sidebar_width) } else { (sidebar_width, inspector_width) };
+        let left = egui::Rect::from_min_max(body.min, egui::pos2(body.min.x + left_width, body.max.y));
+        let right = egui::Rect::from_min_max(egui::pos2(body.max.x - right_width, body.min.y), body.max);
+        let middle = egui::Rect::from_min_max(egui::pos2(left.max.x, body.min.y), egui::pos2(right.min.x, body.max.y));
+        let (sidebar_rect, inspector_rect) = if rtl { (right, left) } else { (left, right) };
+        // The lines between the regions.
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let painter = ui.painter();
+        painter.hline(full.x_range(), toolbar_rect.max.y, line);
+        painter.hline(full.x_range(), status_rect.min.y, line);
+        if left_width > 0.0 {
+            painter.vline(left.max.x, body.y_range(), line);
         }
-        if !self.state.inspector_hidden && (view.crop.is_some() || view.enhance.is_some()) {
-            craft_ui::direction::end_panel(ui, "scancraft.inspector")
-                .exact_size(inspector::WIDTH)
-                .resizable(false)
-                .show_separator_line(true)
-                .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12)))
-                .show(ui, |ui| inspector::inspector(ui, &mut self.state, view, engine));
+        if right_width > 0.0 {
+            painter.vline(right.min.x, body.y_range(), line);
         }
-        // The canvas takes everything the panels leave, edge to edge, dark in both appearances.
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+        // The widgets, in the order of the keyboard's walk.
+        region(ui, toolbar_rect, |ui| toolbar::toolbar(ui, &mut self.state, view, engine));
+        if sidebar_width > 0.0 {
+            region(ui, sidebar_rect, |ui| sidebar::sidebar(ui, &mut self.state, view, engine));
+        }
+        // The canvas takes everything the regions leave, edge to edge, dark in both appearances.
+        region(ui, middle, |ui| {
             if view.crop.is_some() {
                 crop::crop_screen(ui, &mut self.state, view, engine);
             } else if view.enhance.is_some() {
@@ -132,6 +136,20 @@ impl ScanCraftUi {
                 canvas::waiting(ui, rect, &self.state.text.t("Reading your photos…"));
             }
         });
+        if inspector_width > 0.0 {
+            let clip = inspector_rect;
+            region(ui, inspector_rect.shrink(12.0), |ui| {
+                ui.set_clip_rect(clip.intersect(ui.clip_rect()));
+                inspector::inspector(ui, &mut self.state, view, engine)
+            });
+        }
+        region(ui, status_rect, |ui| statusbar::status_bar(ui, &mut self.state, view, engine));
+        // The two flags the filter inspector sets for the canvas (read a frame later, since the
+        // canvas is made before it) mean nothing without it.
+        if inspector_width == 0.0 || view.enhance.is_none() {
+            self.state.keys_taken = false;
+            self.state.show_original = false;
+        }
     }
 
     /// ⌘A selects every page, and Escape lets go of a selection (in Crop, Escape is Done, and the
@@ -189,6 +207,11 @@ impl ScanCraftUi {
     /// What the app shell has to do this frame: open a panel, show a window.
     pub fn take_actions(&mut self) -> Vec<UiAction> {
         std::mem::take(&mut self.state.actions)
+    }
+
+    /// Tells the interface what the system's Reduce Motion and Increase Contrast are (§4.9).
+    pub fn set_accessibility(&mut self, accessibility: Accessibility) {
+        self.state.accessibility = accessibility;
     }
 
     /// The Settings window's values (§4.6).
@@ -292,13 +315,16 @@ impl ScanCraftUi {
         if self.state.notices.is_empty() {
             return;
         }
-        // The next frame that has to change something: the fade's start, then every frame of it.
+        // With Reduce Motion a toast does not fade, so the only frame it needs is the one on which it
+        // goes; otherwise the fade's start, and then every frame of it.
+        let still = self.state.accessibility.reduce_motion;
+        let lead = if still { 0.0 } else { state::TOAST_FADE };
         let next = self
             .state
             .notices
             .iter()
             .filter(|toast| !toast.error)
-            .filter_map(|toast| toast.shown_at.map(|at| at + state::TOAST_SECONDS - state::TOAST_FADE - now))
+            .filter_map(|toast| toast.shown_at.map(|at| at + state::TOAST_SECONDS - lead - now))
             .fold(f64::INFINITY, f64::min);
         if next <= 0.0 {
             ui.ctx().request_repaint();
@@ -317,11 +343,15 @@ impl ScanCraftUi {
                 ui.vertical_centered(|ui| {
                     for (index, toast) in &rows {
                         ui.scope(|ui| {
-                            ui.set_opacity(toast.opacity(now));
+                            ui.set_opacity(toast.opacity(now, still));
                             egui::Frame::popup(ui.style()).show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::toast_icon(ui, toast.error);
-                                    ui.label(&toast.text);
+                                    let message = ui.label(&toast.text);
+                                    // A screen reader says the message when it appears, without the
+                                    // user going to find it: politely for news, at once for an error.
+                                    let live = if toast.error { egui::accesskit::Live::Assertive } else { egui::accesskit::Live::Polite };
+                                    ui.ctx().accesskit_node_builder(message.id, |node| node.set_live(live));
                                     if toast.undo && ui.button(&undo_label).clicked() {
                                         undo = true;
                                         closed = Some(*index);
@@ -388,6 +418,14 @@ impl ScanCraftUi {
         });
         self.state.about_open = open;
     }
+}
+
+/// Lays out `add` in `rect`, clipped to it, top down from its corner.
+fn region(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        add(ui);
+    });
 }
 
 impl Default for ScanCraftUi {
