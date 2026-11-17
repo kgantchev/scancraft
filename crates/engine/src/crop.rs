@@ -14,6 +14,29 @@ pub const MIN_ANGLE: f64 = 20.0;
 pub const MAX_ANGLE: f64 = 160.0;
 /// Below this sine of the angle between two sides they count as parallel when sliding a corner.
 pub const PARALLEL_EPS: f64 = 1e-3;
+/// A detected outline scoring below this is flagged for a second look.
+pub const LOW_SCORE: f32 = 0.5;
+
+/// Why a page's edges need the user's eye, or `None` when they do not: detection found nothing,
+/// scored low, or produced an outline that is not a valid shape. An outline the user drew, or the
+/// whole photo, is never flagged for the way it was made (it can still be invalid).
+///
+/// A photo that looks like a two-page spread is a reason too, but nothing finds one yet: A30 only
+/// runs once a photo is split.
+pub fn review_reason(page: &scancraft_core::recipe::Page) -> Option<scancraft_core::engine_api::ReviewReason> {
+    use scancraft_core::engine_api::ReviewReason;
+    use scancraft_core::recipe::CornerOrigin;
+    if matches!(page.corners_from, CornerOrigin::NotFound) {
+        return Some(ReviewReason::NotFound);
+    }
+    if invalid_reason(&page.corners, &page.sides).is_some() {
+        return Some(ReviewReason::InvalidOutline);
+    }
+    match page.corners_from {
+        CornerOrigin::Detected { score, .. } if score < LOW_SCORE => Some(ReviewReason::LowScore),
+        _ => None,
+    }
+}
 
 /// Where a corner dragged to `p` ends up: at most 15% of the photo's width or height outside it.
 /// A photo of unknown size (0 × 0, before it is decoded) clamps nothing.
@@ -171,6 +194,47 @@ mod tests {
 
     fn straight() -> [SideShape; 4] {
         [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight]
+    }
+
+    fn page_with(corners: Quad, origin: scancraft_core::recipe::CornerOrigin) -> scancraft_core::recipe::Page {
+        use scancraft_core::recipe::{FlattenMode, Look, Page, PageId, PhotoId, SourceId, TurnOrigin};
+        Page {
+            id: PageId(1),
+            photo: PhotoId(1),
+            source: SourceId("ab".into()),
+            corners,
+            corners_from: origin,
+            sides: straight(),
+            spread: None,
+            flatten: FlattenMode::Auto,
+            sheet: None,
+            proportions: None,
+            page_size_mm: None,
+            quarter_turns: 0,
+            turns_from: TurnOrigin::Auto,
+            look: Look::ColorDocument,
+            strength: 60,
+            text: None,
+        }
+    }
+
+    #[test]
+    fn a_page_is_flagged_for_a_look_when_detection_found_nothing_scored_low_or_gave_a_bad_shape() {
+        use scancraft_core::engine_api::ReviewReason;
+        use scancraft_core::recipe::{CornerOrigin, Detector};
+        let found = |score: f32| CornerOrigin::Detected { by: Detector::Contours, score };
+        assert_eq!(review_reason(&page_with(rect(), CornerOrigin::NotFound)), Some(ReviewReason::NotFound));
+        assert_eq!(review_reason(&page_with(rect(), found(LOW_SCORE - 0.01))), Some(ReviewReason::LowScore));
+        assert_eq!(review_reason(&page_with(rect(), found(LOW_SCORE))), None, "the threshold itself is good enough");
+        assert_eq!(review_reason(&page_with(rect(), found(0.9))), None);
+        // A shape that is not a page, whatever made it.
+        let bow_tie = Quad([Point::new(100.0, 100.0), Point::new(500.0, 400.0), Point::new(500.0, 100.0), Point::new(100.0, 400.0)]);
+        for origin in [found(0.9), CornerOrigin::Manual] {
+            assert_eq!(review_reason(&page_with(bow_tie, origin)), Some(ReviewReason::InvalidOutline), "{origin:?}");
+        }
+        // An outline the user drew, or the whole photo, is not a guess.
+        assert_eq!(review_reason(&page_with(rect(), CornerOrigin::Manual)), None);
+        assert_eq!(review_reason(&page_with(rect(), CornerOrigin::FullImage)), None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::pipeline::{
     export_pdf, load_photo, page_geometry, photo_key, recognize_page, render_small, thumbnail, unfinished_note,
 };
 use crate::{Detected, Engine, PhotoStatus, Target};
-use scancraft_core::engine_api::{ImageKey, LoupeCrop, Screen};
+use scancraft_core::engine_api::{ExportSummary, ImageKey, LoupeCrop, Screen};
 use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{CornerOrigin, FlattenMode, Look, Page, PageId, PhotoId, PhotoItem, RecognizedText, TurnOrigin};
@@ -167,9 +167,21 @@ impl Engine {
 
     fn image_plan(&self, key: ImageKey) -> Option<ImagePlan> {
         match key {
-            // The contract has the unfiltered preview (Show Original); the engine does not make
-            // it yet, so it is never ready.
-            ImageKey::OriginalPreview(_) => None,
+            // The page as it is cropped, flattened and turned, with no filter on it: what Show
+            // Original compares the filtered page with.
+            ImageKey::OriginalPreview(page_id) => {
+                let mut page = self.session.page(page_id)?.clone();
+                let item = self.session.photo(page.photo)?.clone();
+                page.look = Look::Original;
+                page.strength = 0;
+                Some(ImagePlan {
+                    cache_key: cache_key(&page, PREVIEW_LONG_SIDE, CacheKind::LookPreview),
+                    item,
+                    page: Some(page),
+                    long_side: PREVIEW_LONG_SIDE,
+                    priority: JobPriority::Preview,
+                })
+            }
             ImageKey::DisplayCopy(photo) => {
                 let item = self.session.photo(photo)?.clone();
                 let cache_key = display_key(&item.source, crate::pipeline::photo_key(&item.source, &item.origin).1);
@@ -228,6 +240,35 @@ impl Engine {
         }
     }
 
+    /// Whether a page still has background work that changes how it looks: its flattening, or
+    /// turning it upright. Its picture is not final until they are done.
+    pub(crate) fn page_busy(&self, id: PageId) -> bool {
+        [&self.flatten_tags, &self.upright_tags].iter().any(|tags| tags.get(&id).is_some_and(|tag| self.inflight.contains(tag)))
+    }
+
+    /// Whether a page's text is being read now.
+    pub(crate) fn reading_text_of(&self, id: PageId) -> bool {
+        self.text_tags.get(&id).is_some_and(|tag| self.inflight.contains(tag))
+    }
+
+    /// Starts reading a page's text when it has none, there is a recogniser, and the page has
+    /// settled: not while it is still being flattened or turned, which change the page the text
+    /// is read from. Whatever finishes those calls this again.
+    pub(crate) fn ensure_text(&mut self, id: PageId) {
+        if self.services.recognizer.is_none() || self.page_busy(id) {
+            return;
+        }
+        let Some(page) = self.session.page(id).cloned() else { return };
+        if page.text.is_some() {
+            return;
+        }
+        let tag = tag_of(&["text", &text_key(&page)]);
+        if self.inflight.contains(&tag) || self.failed.contains(&tag) {
+            return;
+        }
+        self.submit_recognition(&page);
+    }
+
     /// Starts text recognition for a page in the background (lowest priority).
     pub(crate) fn submit_recognition(&mut self, page: &Page) {
         // The text is read whether or not the last export asked for it: a later export may.
@@ -241,6 +282,7 @@ impl Engine {
         let for_key = text_key(&page);
         let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["text", &for_key]), ..JobMeta::default() };
         let id = page.id;
+        self.text_tags.insert(id, meta.tag);
         self.submit_job(
             JobPriority::Recognition,
             token,
@@ -262,6 +304,7 @@ impl Engine {
         let for_key = text_key(&page);
         let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["upright", &for_key]), ..JobMeta::default() };
         let id = page.id;
+        self.upright_tags.insert(id, meta.tag);
         self.submit_job(
             JobPriority::Preview,
             token,
@@ -332,6 +375,7 @@ impl Engine {
         let for_key = flatten_key(&page);
         let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["flatten", &for_key]), ..JobMeta::default() };
         let id = page.id;
+        self.flatten_tags.insert(id, meta.tag);
         self.submit_job(
             JobPriority::Preview,
             token,
@@ -364,11 +408,14 @@ impl Engine {
         let token = self.fresh_token(Target::Export);
         let ctx = self.ctx();
         let meta = JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() };
+        let progress = self.export_done.clone();
         self.submit_job(
             JobPriority::Render,
             token,
             meta,
-            Box::new(move |token| export_pdf(&ctx, &pages, &options, &title, &path, token).map(|report| JobOutput::Exported { report, path })),
+            Box::new(move |token| {
+                export_pdf(&ctx, &pages, &options, &title, &path, token, &progress).map(|report| JobOutput::Exported { report, path })
+            }),
         );
     }
 
@@ -446,8 +493,13 @@ impl Engine {
                 // Cancelling a job is not news, with one exception. An export is cancelled when
                 // an undo restores a snapshot, and it must not stay marked as running: that
                 // refused every later export. The screen is left as the restore set it.
-                if meta.tag == tag_of(&["export"]) && self.exporting.take().is_some() {
-                    self.notify("The PDF wasn't written, because the pages changed while it was being made.", false);
+                if meta.tag == tag_of(&["export"]) && self.exporting {
+                    self.exporting = false;
+                    if std::mem::take(&mut self.export_cancelled) {
+                        self.notify("The export was cancelled. No PDF was written.", false);
+                    } else {
+                        self.notify("The PDF wasn't written, because the pages changed while it was being made.", false);
+                    }
                     return true;
                 }
                 return false;
@@ -486,6 +538,9 @@ impl Engine {
                     p.text = None;
                     self.mark_dirty();
                 }
+                // The page has settled as far as the turn goes: its text can be read.
+                self.upright_tags.remove(&page);
+                self.ensure_text(page);
                 true
             }
             JobOutput::Spine { photo, whole, spine } => self.apply_spine(photo, whole, spine),
@@ -496,12 +551,19 @@ impl Engine {
                 }
                 let Some(p) = self.session.page_mut(page) else { return false };
                 // A decision made for an older outline or setting is dropped.
-                if flatten_key(p) != for_key || p.sheet == fit {
+                if flatten_key(p) != for_key {
                     return false;
                 }
+                let changed = p.sheet != fit;
                 p.sheet = fit;
-                self.mark_dirty();
-                true
+                if changed {
+                    // The text was read from the page before it was flattened.
+                    p.text = None;
+                    self.mark_dirty();
+                }
+                self.flatten_tags.remove(&page);
+                self.ensure_text(page);
+                changed
             }
             JobOutput::Exported { report, path } => self.export_finished(report, path),
             JobOutput::Decoded => true,
@@ -517,9 +579,7 @@ impl Engine {
             self.failed.insert(meta.tag);
         }
         if meta.tag == tag_of(&["export"]) {
-            if let Some(back) = self.exporting.take() {
-                self.screen = back;
-            }
+            self.exporting = false;
             // A step that isn't finished stops the export, and the notice says which one.
             let why = e.unfinished_step().map_or_else(|| e.to_string(), unfinished_note);
             self.notify(format!("The PDF couldn't be written: {why}"), true);
@@ -529,6 +589,10 @@ impl Engine {
         if let Some(step) = e.unfinished_step() {
             self.notify(unfinished_note(step), false);
             return true;
+        }
+        // A page whose picture could not be made says so in its state, until its recipe changes.
+        if let Some(page) = meta.page {
+            self.page_failures.insert(page, e.to_string());
         }
         let name = meta.photo.and_then(|p| self.names.get(&p).cloned());
         let is_detect = meta.tag == tag_of(&["detect", &meta.photo.map_or(0, |p| p.0).to_string()]);
@@ -550,9 +614,12 @@ impl Engine {
 
     /// Removes a photo and every page cut from it.
     pub(crate) fn drop_photo(&mut self, photo: PhotoId) {
+        let at = self.session.file().pages.iter().position(|p| p.photo == photo).unwrap_or(0);
         let pages: Vec<PageId> = self.session.pages_of(photo).iter().map(|p| p.id).collect();
         for id in pages {
             self.cancel_page(id);
+            self.reviewed.remove(&id);
+            self.page_failures.remove(&id);
         }
         if let Some(t) = self.tokens.remove(&Target::Photo(photo)) {
             t.cancel();
@@ -565,10 +632,8 @@ impl Engine {
         if self.current_photo == Some(photo) {
             self.current_photo = None;
         }
-        if matches!(self.screen, Screen::Crop(p) if p == photo) || self.current_page.is_some_and(|c| self.session.page(c).is_none()) {
-            self.current_page = None;
-            self.screen = Screen::Import;
-        }
+        // What was open may be gone with the photo: show the page that took its place.
+        self.fix_screen(at);
         self.mark_dirty();
     }
 
@@ -583,8 +648,7 @@ impl Engine {
         for note in &found.notes {
             self.notify(note.clone(), false);
         }
-        let wanting: Vec<PageId> =
-            self.session.pending().iter().filter(|p| p.photo == photo && self.want_auto.contains(&p.id)).map(|p| p.id).collect();
+        let wanting: Vec<PageId> = self.session.pages_of(photo).iter().filter(|p| self.want_auto.contains(&p.id)).map(|p| p.id).collect();
         for id in wanting {
             self.want_auto.remove(&id);
             if let Err(e) = self.apply_detected_to(id, &detected) {
@@ -592,21 +656,35 @@ impl Engine {
             }
         }
         if self.session.pages_of(photo).is_empty() {
-            let page = self.new_page(&item, &found);
-            self.session.pending_mut().push(page);
-            if self.session.file().book_spreads {
-                // A30 isn't finished: the spread is cut down the middle, and the user can move the spine.
-                if self.split_pending(photo).is_ok() {
-                    self.notify("Finding a book's spine isn't ready yet (A30): the photo is cut down the middle.", false);
-                }
-            }
-        }
-        if self.screen == Screen::Import && self.current_photo.is_none() {
-            self.screen = Screen::Crop(photo);
-            self.current_photo = Some(photo);
+            self.join_document(&item, &found);
         }
         self.mark_dirty();
         true
+    }
+
+    /// Cuts the page (or, with Book Spreads on, the two pages) of a photo whose outline was just
+    /// found, and puts it in the document, after the pages of the photos before it. The screen is
+    /// not changed: pages join while the user works, except that the first page opens when there
+    /// is nothing open yet.
+    fn join_document(&mut self, item: &PhotoItem, found: &DetectedPhoto) {
+        let page = self.new_page(item, found);
+        let at = self.session.insert_index(item.id);
+        let pages = &mut self.session.file_mut().pages;
+        pages.insert(at.min(pages.len()), page);
+        self.session.file_mut().exported = false;
+        if self.session.file().book_spreads {
+            // A30 isn't finished: the spread is cut down the middle, and the user can move the spine.
+            if self.split_photo(item.id).is_ok() {
+                self.notify("Finding a book's spine isn't ready yet (A30): the photo is cut down the middle.", false);
+            }
+        }
+        // A page whose outline is no use stays as it is, flagged for a look: that is what the
+        // flag is for, so it is not an error to show.
+        let ids = self.page_ids(item.id);
+        let _ = self.finish_pages(item.id, &ids);
+        if self.screen == Screen::Import && self.current_photo.is_none() {
+            self.screen = self.screen_near(at);
+        }
     }
 
     /// A page for a photo whose outline was just found.
@@ -637,9 +715,10 @@ impl Engine {
     }
 
     fn export_finished(&mut self, report: ExportReport, path: PathBuf) -> bool {
-        if let Some(back) = self.exporting.take() {
-            self.screen = back;
-        }
+        self.exporting = false;
+        self.export_cancelled = false;
+        let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+        self.last_export = Some(ExportSummary { path: path.to_string_lossy().into_owned(), pages: report.pages as u32, bytes });
         self.session.file_mut().exported = true;
         self.mark_dirty();
         let _ = self.save_now();
@@ -654,12 +733,6 @@ impl Engine {
             self.notify(n, false);
         }
         true
-    }
-
-    /// The corners a photo starts with when no page was found: 3% inside its edges.
-    pub(crate) fn fallback_corners(&self, photo: PhotoId) -> Option<scancraft_core::geom::Quad> {
-        let item = self.session.photo(photo)?;
-        (item.size != (0, 0)).then(|| crate::crop::not_found_corners(item.size))
     }
 
     /// The geometry of a page, for the view and the commands: `None` when the photo isn't decoded yet.
@@ -709,13 +782,14 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_export_says_so_and_returns_to_the_screen_it_came_from() {
+    fn a_failed_export_says_so_and_leaves_the_screen_alone() {
         let (mut engine, dir) = engine("export");
-        engine.exporting = Some(Screen::Import);
-        engine.screen = Screen::Export;
+        engine.exporting = true;
+        engine.screen = Screen::Import;
         assert!(engine.apply_done(failed(tag_of(&["export"]), Step::A23)));
+        // The export no longer moves the screen, so there is nothing to put back.
         assert_eq!(engine.screen, Screen::Import);
-        assert!(engine.exporting.is_none());
+        assert!(!engine.exporting);
         assert!(
             engine.pending_notices.iter().any(|n| n.error && n.text.contains("PDF") && n.text.contains("isn't ready yet")),
             "{:?}",
@@ -723,7 +797,7 @@ mod tests {
         );
         // A real failure is shown with its reason.
         engine.pending_notices.clear();
-        engine.exporting = Some(Screen::Import);
+        engine.exporting = true;
         let done = JobDone { meta: JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() }, outcome: Err(EngineError::msg("the disk is full")) };
         assert!(engine.apply_done(done));
         assert!(engine.pending_notices.iter().any(|n| n.error && n.text.contains("the disk is full")));
@@ -735,14 +809,26 @@ mod tests {
         // Undo restores a snapshot and cancels every job, the export's included. The export's
         // flag used to stay set, so every later export failed with "already being made".
         let (mut engine, dir) = engine("export-cancelled");
-        engine.exporting = Some(Screen::Export);
+        engine.exporting = true;
         engine.screen = Screen::Import;
         let done = JobDone { meta: JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() }, outcome: Err(EngineError::Cancelled) };
         assert!(engine.apply_done(done));
-        assert!(engine.exporting.is_none(), "the flag for an export in progress is still set");
-        // The screen is the one the undo restored, not the one the export came from.
+        assert!(!engine.exporting, "the flag for an export in progress is still set");
         assert_eq!(engine.screen, Screen::Import);
-        assert!(engine.pending_notices.iter().any(|n| n.text.contains("PDF")), "{:?}", engine.pending_notices);
+        assert!(engine.pending_notices.iter().any(|n| n.text.contains("pages changed")), "{:?}", engine.pending_notices);
+        // The user's own cancel says so, and is not the pages changing.
+        engine.pending_notices.clear();
+        engine.exporting = true;
+        engine.export_cancelled = true;
+        let done = JobDone { meta: JobMeta { tag: tag_of(&["export"]), ..JobMeta::default() }, outcome: Err(EngineError::Cancelled) };
+        assert!(engine.apply_done(done));
+        assert!(!engine.exporting && !engine.export_cancelled);
+        assert!(
+            engine.pending_notices.iter().any(|n| n.text.contains("cancelled") && !n.error)
+                && !engine.pending_notices.iter().any(|n| n.text.contains("pages changed")),
+            "{:?}",
+            engine.pending_notices
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

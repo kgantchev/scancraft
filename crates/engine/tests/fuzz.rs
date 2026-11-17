@@ -15,6 +15,10 @@ const ITERATIONS: usize = 12_000;
 
 struct Fuzz {
     rng: Xorshift64Star,
+    /// The pages and photos the session has now, so most commands name one that exists: pages are
+    /// numbered up from 1 and the numbers run away from any fixed range as photos come and go.
+    pages: Vec<u64>,
+    photos: Vec<u64>,
     files: Vec<String>,
     folder: String,
     out: String,
@@ -35,10 +39,16 @@ impl Fuzz {
     }
 
     fn page(&mut self) -> PageId {
+        if !self.pages.is_empty() && self.rng.below(4) != 0 {
+            return PageId(self.pick(&self.pages.clone()));
+        }
         PageId(if self.rng.below(8) == 0 { self.pick(&[0, u64::MAX, 1 << 40]) } else { self.rng.below(14) })
     }
 
     fn photo(&mut self) -> PhotoId {
+        if !self.photos.is_empty() && self.rng.below(4) != 0 {
+            return PhotoId(self.pick(&self.photos.clone()));
+        }
         PhotoId(if self.rng.below(8) == 0 { self.pick(&[0, u64::MAX, 1 << 40]) } else { self.rng.below(6) })
     }
 
@@ -69,7 +79,7 @@ impl Fuzz {
             }
             // A label touches the disk, so it is rare too. Its folder is the one the photos were
             // imported from (where a label can succeed) or a junk path (where it can't).
-            41..=90 => {
+            41..=190 => {
                 let folder = match self.rng.below(5) {
                     0 => String::new(),
                     1 => "\0".to_string(),
@@ -79,6 +89,14 @@ impl Fuzz {
                 let category = self.pick(&["", "dark desk", "wood", "not a category", "\0"]).to_string();
                 return Command::ReferenceLabel { page: self.page(), folder, category };
             }
+            // The commands of the review-first flow are rare too, so the run's other commands keep
+            // the same share of it.
+            191..=210 => return Command::PageMarkReviewed { page: self.page() },
+            211..=230 => {
+                let look = self.pick(&[Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument]);
+                return Command::PageSetLookAll { look, strength: self.rng.below(256) as u8 };
+            }
+            231..=240 => return Command::ExportCancel,
             _ => {}
         }
         match self.rng.below(23) {
@@ -149,14 +167,17 @@ fn run(seed: u64) {
     let files: Vec<String> = (0..4).map(|i| write(&dir, &format!("desk{i}.png"), &desk_png(i))).collect();
     let folder = dir.path().to_string_lossy().into_owned();
     let out = dir.join("fuzz.pdf").to_string_lossy().into_owned();
-    let mut fuzz = Fuzz { rng: Xorshift64Star::new(seed), files, folder, out };
+    let mut fuzz = Fuzz { rng: Xorshift64Star::new(seed), pages: Vec::new(), photos: Vec::new(), files, folder, out };
     let (mut accepted, mut most_pages) = (0usize, 0usize);
     for i in 0..ITERATIONS {
         let command = fuzz.command();
         if engine.dispatch(command).is_ok() {
             accepted += 1;
         }
-        most_pages = most_pages.max(engine.view().tray.len());
+        let tray = engine.view().tray;
+        most_pages = most_pages.max(tray.len());
+        fuzz.pages = tray.iter().map(|t| t.page.0).collect();
+        fuzz.photos = engine.session().file().photos.iter().map(|p| p.id.0).collect();
         if i % 20 == 0 {
             engine.poll();
         }

@@ -57,13 +57,16 @@ fn run(scene: &Scene, mode: FlattenMode) -> (Page, Engine, std::path::PathBuf) {
     let mut engine = Engine::open(options).unwrap();
     engine.dispatch(Command::ImportAdd { paths: vec![path.to_string_lossy().into_owned()] }).unwrap();
     settle(&mut engine);
+    // The page joined the document by itself; Crop re-applies it with the mode.
+    let first = engine.view().tray.first().map(|t| t.page).unwrap();
+    engine.dispatch(Command::PageOpenCrop { page: first }).unwrap();
     let crop = engine.view().crop.unwrap();
     if mode != FlattenMode::Auto {
         engine.dispatch(Command::CropSetFlatten { page: crop.outlines[0].page, mode }).unwrap();
     }
     engine.dispatch(Command::CropApply { photo: crop.photo }).unwrap();
     settle(&mut engine);
-    let page = engine.session().pending().first().cloned().unwrap();
+    let page = engine.session().file().pages.first().cloned().unwrap();
     (page, engine, dir)
 }
 

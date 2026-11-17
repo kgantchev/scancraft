@@ -590,6 +590,7 @@ pub fn export_pdf(
     title: &str,
     dest: &Path,
     token: &CancellationToken,
+    progress: &std::sync::atomic::AtomicU32,
 ) -> Result<ExportReport, EngineError> {
     let mut out = Vec::with_capacity(pages.len());
     let mut report = ExportReport { pages: pages.len(), not_searchable: Vec::new(), notes: Vec::new() };
@@ -619,6 +620,8 @@ pub fn export_pdf(
             _ => None,
         };
         out.push(PdfPage { image: encoded, size_pt: (pw, ph), image_rect_pt: rect, text });
+        // One more page is done: the view reports how many.
+        progress.store(number as u32 + 1, std::sync::atomic::Ordering::Relaxed);
     }
     token.check()?;
     let producer = format!("ScanCraft {} (algorithms {ALGO_VERSION})", env!("CARGO_PKG_VERSION"));

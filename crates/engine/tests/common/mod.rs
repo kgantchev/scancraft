@@ -152,6 +152,42 @@ impl PageDetector for HeldDetector {
     }
 }
 
+/// A detector that takes its time over the photo whose first pixel's red is `marker`, so that
+/// another photo's page can join the document before it.
+pub struct SlowFor {
+    pub quad: Quad,
+    pub marker: u8,
+    pub delay: Duration,
+}
+
+impl PageDetector for SlowFor {
+    fn detect(&self, photo: &Rgb8) -> Result<Option<Quad>, ServiceError> {
+        if photo.get(0, 0).is_some_and(|p| p[0] == self.marker) {
+            std::thread::sleep(self.delay);
+        }
+        Ok(Some(self.quad))
+    }
+}
+
+/// A recogniser that holds the worker until it is released, then reads one word: with one worker
+/// thread, whatever is queued behind it has to wait.
+pub struct GatedWord {
+    pub gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Recognizer for GatedWord {
+    fn name(&self) -> &str {
+        "fake"
+    }
+
+    fn recognize(&self, page: &Gray8, options: &RecognizeOptions) -> Result<RecognizedText, ServiceError> {
+        if let Ok(gate) = self.gate.lock() {
+            let _ = gate.recv_timeout(Duration::from_secs(20));
+        }
+        OneWord.recognize(page, options)
+    }
+}
+
 /// A recogniser that reads one word.
 pub struct OneWord;
 
@@ -222,7 +258,17 @@ pub fn texts(notices: &[Notice]) -> Vec<String> {
     notices.iter().map(|n| n.text.clone()).collect()
 }
 
-/// The photo on Screen 2 and its first pending page.
+/// The page joins the document by itself and the finished page opens. Many tests are about Crop,
+/// so they go on to it: the first photo's page, once, as the first photo used to open.
+pub fn open_crop_on_first_page(engine: &mut Engine) {
+    if engine.view().crop.is_none()
+        && let Some(item) = engine.view().tray.first()
+    {
+        engine.dispatch(scancraft_core::command::Command::PageOpenCrop { page: item.page }).unwrap();
+    }
+}
+
+/// The photo on Screen 2 and its first page.
 pub fn current(engine: &Engine) -> (PhotoId, PageId) {
     let crop = engine.view().crop.expect("Screen 2 should be showing");
     (crop.photo, crop.outlines[0].page)

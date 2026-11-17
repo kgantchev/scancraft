@@ -1,9 +1,11 @@
 //! The dispatcher (§6.3): every command by id, with the undo bookkeeping around it.
 //!
 //! A command checks everything it needs before it changes anything, so an error leaves the session
-//! exactly as it was. Commands run by a program never open dialogs: where the interface asks a
-//! question (an export with photos not yet added), the first call answers with an error that carries
-//! the question and the next call goes through.
+//! exactly as it was. Commands run by a program never open dialogs.
+//!
+//! Every page is in the document from the moment its photo has been read: Crop edits it in place
+//! and nothing has to be added. (Sessions saved by an earlier version kept the pages being
+//! corrected apart; the engine moves them into the document when it opens the session.)
 
 use crate::crop::{clamp_corner, full_image_corners, invalid_reason, move_side};
 use crate::error::EngineError;
@@ -33,9 +35,6 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 impl Engine {
     /// Runs one command; on success the change is recorded for undo, on failure nothing changed.
     pub(crate) fn execute(&mut self, command: Command) -> Result<(), EngineError> {
-        if !matches!(command, Command::ExportPdf { .. }) {
-            self.export_confirmed = false;
-        }
         match command {
             Command::EditUndo => {
                 let now = self.snapshot();
@@ -93,6 +92,8 @@ impl Engine {
             Command::CropFullImage { page } => self.crop_full_image(*page),
             Command::CropApply { photo } => self.crop_apply(*photo),
             Command::PageSetLook { page, look } => self.page_set_look(*page, *look),
+            Command::PageSetLookAll { look, strength } => self.page_set_look_all(*look, *strength),
+            Command::PageMarkReviewed { page } => self.page_mark_reviewed(*page),
             Command::PageSetStrength { page, value } => self.page_edit_look(*page, |p| p.strength = (*value).min(100)),
             Command::PageRotate { page, quarter_turns } => self.page_rotate(*page, *quarter_turns),
             Command::PageAdd { page } => self.page_add(*page),
@@ -104,11 +105,7 @@ impl Engine {
             Command::ExportPdf { path, options } => self.export_pdf_command(path, options),
             Command::SessionNew => self.session_new(),
             Command::SessionRestore => self.session_restore(),
-            // The contract has these (the review-first flow); the engine does not do them yet. They
-            // answer with an error the interface can show, and change nothing.
-            Command::PageSetLookAll { .. } | Command::PageMarkReviewed { .. } | Command::ExportCancel => {
-                Err(EngineError::msg("That isn't available yet."))
-            }
+            Command::ExportCancel => self.export_cancel(),
             // Handled before the snapshot is taken.
             Command::EditUndo | Command::EditRedo => Ok(()),
         }
@@ -122,6 +119,10 @@ impl Engine {
         }
         let mut problems = Vec::new();
         let files = expand_paths(paths, &mut problems);
+        // A new batch starts the count again; photos added while one is running join it.
+        if !self.status.values().any(|s| *s == PhotoStatus::Pending) {
+            self.batch_total = 0;
+        }
         let mut imported = 0usize;
         for file in files {
             if self.session.file().photos.len() >= MAX_PAGES {
@@ -143,7 +144,7 @@ impl Engine {
         }
         if imported == 0 {
             return Err(EngineError::msg(if problems.is_empty() {
-                "Those files are already waiting to be corrected.".to_string()
+                "Those files are already being read.".to_string()
             } else {
                 "No file could be imported.".to_string()
             }));
@@ -158,21 +159,22 @@ impl Engine {
         let source = SourceId(scancraft_io::import::source_id(&bytes));
         let tiff_pages = if kind == Kind::Tiff { scancraft_io::import::tiff_page_count(&bytes) } else { 0 };
         // The first item of the file: the same file (or the same page of it) twice is imported once
-        // while the first is still waiting to be corrected, so a file dropped twice in a row doesn't
-        // make two photos. Once its page is in the tray (or was deleted), the file may be imported
-        // again: the user may want another scan of it, and has no other way to get it back.
+        // while the first is still being read, so a file dropped twice in a row doesn't make two
+        // photos. Once it has been read (or its page was deleted), the file may be imported again:
+        // the user may want another scan of it, and has no other way to get it back.
         let first = match kind {
             Kind::Pdf => ImportOrigin::PdfPage { index: 0 },
             Kind::Tiff if tiff_pages > 1 => ImportOrigin::TiffPage { index: 0 },
             _ => ImportOrigin::File,
         };
-        let waiting = self.session.file().photos.iter().any(|p| {
-            p.source == source
-                && p.origin == first
-                && (matches!(self.status.get(&p.id), Some(PhotoStatus::Pending)) || !self.pending_ids(p.id).is_empty())
-        });
+        let waiting = self
+            .session
+            .file()
+            .photos
+            .iter()
+            .any(|p| p.source == source && p.origin == first && matches!(self.status.get(&p.id), Some(PhotoStatus::Pending)));
         if waiting {
-            self.notify(format!("{name} is already waiting to be corrected."), false);
+            self.notify(format!("{name} is already being read."), false);
             return Ok(0);
         }
         // The source is copied into the session before it is read, so the bytes can be moved into the
@@ -224,36 +226,22 @@ impl Engine {
             self.names.insert(id, label);
             self.status.insert(id, PhotoStatus::Pending);
             self.submit_detect(&item);
+            self.batch_total += 1;
             added += 1;
         }
         Ok(added)
     }
 
+    /// Removes a photo and every page cut from it ("Remove Photo").
     fn import_discard(&mut self, photo: PhotoId) -> Result<(), EngineError> {
         if self.session.photo(photo).is_none() {
             return Err(EngineError::NoPhoto(photo));
         }
-        // The pages already in the tray stay: they hold their own recipe and the source stays in the session.
-        let pages: Vec<PageId> = self.session.pending().iter().filter(|p| p.photo == photo).map(|p| p.id).collect();
-        for id in pages {
-            self.cancel_page(id);
-        }
-        if let Some(t) = self.tokens.remove(&Target::Photo(photo)) {
-            t.cancel();
-        }
-        self.session.pending_mut().retain(|p| p.photo != photo);
-        let in_tray = self.session.file().pages.iter().any(|p| p.photo == photo);
-        if !in_tray {
-            self.session.file_mut().photos.retain(|p| p.id != photo);
-            self.status.remove(&photo);
-            self.detected.remove(&photo);
-            self.names.remove(&photo);
-        }
-        if self.current_photo == Some(photo) {
-            self.current_photo = None;
-        }
-        if matches!(self.screen, Screen::Crop(p) if p == photo) {
-            self.screen = self.next_screen_after(None);
+        let at = self.session.file().pages.iter().position(|p| p.photo == photo).unwrap_or(0);
+        self.drop_photo(photo);
+        self.names.remove(&photo);
+        if matches!(self.screen, Screen::Crop(_) | Screen::Enhance(_)) && self.current_page.is_none_or(|p| self.session.page(p).is_none()) {
+            self.screen = self.screen_near(at);
         }
         Ok(())
     }
@@ -274,6 +262,8 @@ impl Engine {
         page.proportions = None;
         page.page_size_mm = None;
         page.sheet = None;
+        // The recognised text belongs to the outline it was read from.
+        page.text = None;
         if manual {
             page.corners_from = CornerOrigin::Manual;
         }
@@ -331,7 +321,7 @@ impl Engine {
             return Err(EngineError::msg("This photo is still being read."));
         }
         if page.spread.is_some() {
-            self.join_pending(page.photo)?;
+            self.join_photo(page.photo)?;
         }
         self.edit_outline(
             id,
@@ -364,7 +354,7 @@ impl Engine {
         let page = self.session.page(id).ok_or(EngineError::NoPage(id))?.clone();
         let (was_split, photo) = (page.spread.is_some(), page.photo);
         if was_split {
-            self.join_pending(photo)?;
+            self.join_photo(photo)?;
         }
         let (corners, sides, origin) = (found.corners, found.sides.clone(), found.origin);
         let flatten = if self.settings.get().flatten_automatically && !matches!(origin, CornerOrigin::FullImage) {
@@ -383,37 +373,31 @@ impl Engine {
             false,
         )?;
         if was_split || self.session.file().book_spreads {
-            self.split_pending(photo)?;
+            self.split_photo(photo)?;
         }
         Ok(())
     }
 
     // ---- spreads ----
 
-    fn pending_ids(&self, photo: PhotoId) -> Vec<PageId> {
-        self.session.pending().iter().filter(|p| p.photo == photo).map(|p| p.id).collect()
+    /// The ids of the pages cut from a photo, in the order of the document.
+    pub(crate) fn page_ids(&self, photo: PhotoId) -> Vec<PageId> {
+        self.session.pages_of(photo).iter().map(|p| p.id).collect()
     }
 
-    fn tray_holds(&self, photo: PhotoId) -> bool {
-        self.session.file().pages.iter().any(|p| p.photo == photo)
-    }
-
-    /// Cuts the photo's one pending page into a left and a right page down the middle. The cut is
-    /// at first the straight line between the middle of the top and bottom sides; A30 moves it to
+    /// Cuts the photo's one page into a left and a right page down the middle. The cut is at
+    /// first the straight line between the middle of the top and bottom sides; A30 moves it to
     /// the spine in the background.
-    pub(crate) fn split_pending(&mut self, photo: PhotoId) -> Result<(), EngineError> {
-        let ids = self.pending_ids(photo);
+    pub(crate) fn split_photo(&mut self, photo: PhotoId) -> Result<(), EngineError> {
+        let ids = self.page_ids(photo);
         let [id] = ids[..] else {
             // Nothing to cut, or already cut in two: there is no work to do.
             return Ok(());
         };
-        let Some(index) = self.session.pending().iter().position(|p| p.id == id) else { return Ok(()) };
-        let Some(whole) = self.session.pending().get(index).cloned() else { return Ok(()) };
+        let Some(index) = self.session.file().pages.iter().position(|p| p.id == id) else { return Ok(()) };
+        let Some(whole) = self.session.file().pages.get(index).cloned() else { return Ok(()) };
         if whole.spread.is_some() {
             return Ok(());
-        }
-        if self.tray_holds(photo) {
-            return Err(EngineError::msg("A page of this photo was already added, so it can't be split."));
         }
         let mid = |a: Point, b: Point| Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
         let q = whole.corners;
@@ -433,12 +417,14 @@ impl Engine {
             p.proportions = None;
             p.page_size_mm = None;
             p.sheet = None;
+            p.text = None;
         }
         self.cancel_page(whole.id);
-        let pending = self.session.pending_mut();
-        pending.remove(index);
-        pending.insert(index, right);
-        pending.insert(index, left);
+        self.reviewed.remove(&whole.id);
+        let pages = &mut self.session.file_mut().pages;
+        pages.remove(index);
+        pages.insert(index, right);
+        pages.insert(index, left);
         self.loupe = None;
         // The halves stand at the centre line until A30 finds the spine.
         self.submit_spine(photo, q);
@@ -449,8 +435,7 @@ impl Engine {
     /// changed (joined, its spine dragged, its outline edited) is left alone, and a photo A30
     /// says is one page stays cut at the centre, with a note.
     pub(crate) fn apply_spine(&mut self, photo: PhotoId, whole: Quad, spine: Option<scancraft_detect::spread::Spine>) -> bool {
-        let halves: Vec<Page> =
-            self.pending_ids(photo).iter().filter_map(|id| self.session.page(*id)).filter(|p| p.spread.is_some()).cloned().collect();
+        let halves: Vec<Page> = self.page_ids(photo).iter().filter_map(|id| self.session.page(*id)).filter(|p| p.spread.is_some()).cloned().collect();
         let untouched =
             halves.len() == 2 && halves.iter().all(|p| p.spread.as_ref().is_some_and(|s| s.confidence == 0.0 && s.spread_corners == whole));
         if !untouched {
@@ -486,9 +471,9 @@ impl Engine {
         true
     }
 
-    /// The reverse: the photo's two pending halves become one page again.
-    pub(crate) fn join_pending(&mut self, photo: PhotoId) -> Result<(), EngineError> {
-        let ids = self.pending_ids(photo);
+    /// The reverse: the photo's two halves become one page again.
+    pub(crate) fn join_photo(&mut self, photo: PhotoId) -> Result<(), EngineError> {
+        let ids = self.page_ids(photo);
         let halves: Vec<Page> = ids.iter().filter_map(|id| self.session.page(*id)).filter(|p| p.spread.is_some()).cloned().collect();
         let Some(left) = halves.iter().find(|p| p.spread.as_ref().is_some_and(|s| s.half == Half::Left)).cloned() else { return Ok(()) };
         let right = halves.iter().find(|p| p.spread.as_ref().is_some_and(|s| s.half == Half::Right)).cloned();
@@ -505,16 +490,18 @@ impl Engine {
         whole.proportions = None;
         whole.page_size_mm = None;
         whole.sheet = None;
+        whole.text = None;
         for id in ids {
             self.cancel_page(id);
+            self.reviewed.remove(&id);
         }
         if let Some(t) = self.tokens.remove(&Target::Spine(photo)) {
             t.cancel();
         }
-        let pending = self.session.pending_mut();
-        let at = pending.iter().position(|p| p.id == left.id).unwrap_or(0);
-        pending.retain(|p| !(p.photo == photo && p.spread.is_some()));
-        pending.insert(at.min(pending.len()), whole);
+        let pages = &mut self.session.file_mut().pages;
+        let at = pages.iter().position(|p| p.id == left.id).unwrap_or(0);
+        pages.retain(|p| !(p.photo == photo && p.spread.is_some()));
+        pages.insert(at.min(pages.len()), whole);
         self.loupe = None;
         Ok(())
     }
@@ -522,12 +509,18 @@ impl Engine {
     fn crop_book(&mut self, on: bool) -> Result<(), EngineError> {
         self.session.file_mut().book_spreads = on;
         self.settings.update(|s| s.book_spreads = on);
-        let photos: Vec<PhotoId> = self.session.file().photos.iter().map(|p| p.id).filter(|p| !self.tray_holds(*p)).collect();
+        let photos: Vec<PhotoId> = self.session.file().photos.iter().map(|p| p.id).collect();
         for photo in photos {
+            let before = self.page_ids(photo);
             if on {
-                self.split_pending(photo).or_else(|e| if self.pending_ids(photo).is_empty() { Ok(()) } else { Err(e) })?
+                self.split_photo(photo)?
             } else {
-                self.join_pending(photo)?
+                self.join_photo(photo)?
+            }
+            // The pages that were cut or joined need their flattening and their text again.
+            if self.page_ids(photo) != before {
+                let ids = self.page_ids(photo);
+                let _ = self.finish_pages(photo, &ids);
             }
         }
         Ok(())
@@ -537,14 +530,13 @@ impl Engine {
         if self.session.photo(photo).is_none() {
             return Err(EngineError::NoPhoto(photo));
         }
-        if on {
-            if self.pending_ids(photo).is_empty() {
-                return Err(EngineError::msg("This photo has no page to split."));
-            }
-            self.split_pending(photo)
-        } else {
-            self.join_pending(photo)
+        if self.page_ids(photo).is_empty() {
+            return Err(EngineError::msg("This photo has no page to split."));
         }
+        if on { self.split_photo(photo) } else { self.join_photo(photo) }?;
+        let ids = self.page_ids(photo);
+        let _ = self.finish_pages(photo, &ids);
+        Ok(())
     }
 
     fn crop_set_spine(&mut self, photo: PhotoId, top: Point, bottom: Point) -> Result<(), EngineError> {
@@ -560,7 +552,7 @@ impl Engine {
         }
         let size = self.session.photo(photo).map_or((0, 0), |p| p.size);
         let (top, bottom) = (clamp_corner(top, size), clamp_corner(bottom, size));
-        let ids: Vec<PageId> = self.pending_ids(photo).into_iter().filter(|id| self.session.page(*id).is_some_and(|p| p.spread.is_some())).collect();
+        let ids: Vec<PageId> = self.page_ids(photo).into_iter().filter(|id| self.session.page(*id).is_some_and(|p| p.spread.is_some())).collect();
         if ids.is_empty() {
             return Err(EngineError::msg("This photo isn't split into two pages."));
         }
@@ -581,55 +573,21 @@ impl Engine {
         Ok(())
     }
 
-    // ---- Correct Perspective ----
+    // ---- Done with the crop ----
 
-    fn crop_apply(&mut self, photo: PhotoId) -> Result<(), EngineError> {
+    /// Finishes the pages of a photo after their outline was edited (the Done of Crop), or when
+    /// they were first cut: their proportions and size, the flatten decision, turning them
+    /// upright and reading their text. The pages stay where they are in the document and keep
+    /// their look and strength. An invalid outline changes nothing and says why.
+    pub(crate) fn finish_pages(&mut self, photo: PhotoId, ids: &[PageId]) -> Result<(), EngineError> {
         let item = self.session.photo(photo).cloned().ok_or(EngineError::NoPhoto(photo))?;
         if item.size == (0, 0) {
             return Err(EngineError::msg("This photo is still being read."));
         }
-        let mut ids = self.pending_ids(photo);
-        if ids.is_empty() {
-            // The photo has no page yet: one is cut from the outline that was found.
-            let corners = self
-                .detected
-                .get(&photo)
-                .map(|d| d.corners)
-                .or_else(|| self.fallback_corners(photo))
-                .ok_or_else(|| EngineError::msg("This photo is still being read."))?;
-            let origin = self.detected.get(&photo).map_or(CornerOrigin::NotFound, |d| d.origin);
-            let sides: [SideShape; 4] = self
-                .detected
-                .get(&photo)
-                .map_or_else(|| [SideShape::Straight, SideShape::Straight, SideShape::Straight, SideShape::Straight], |d| d.sides.clone());
-            let page = Page {
-                id: self.session.allocate_page_id(),
-                photo,
-                source: item.source.clone(),
-                corners,
-                corners_from: origin,
-                sides,
-                spread: None,
-                flatten: FlattenMode::Off,
-                sheet: None,
-                proportions: None,
-                page_size_mm: None,
-                quarter_turns: 0,
-                turns_from: TurnOrigin::Auto,
-                look: self.last_look,
-                strength: self.last_look.default_strength().unwrap_or(0),
-                text: None,
-            };
-            self.session.pending_mut().push(page);
-            ids = self.pending_ids(photo);
-        }
-        if self.session.file().pages.len() + self.session.pending().len() > MAX_PAGES {
-            return Err(EngineError::msg(format!("A session holds at most {MAX_PAGES} pages.")));
-        }
         let settings = self.settings.get().clone();
         // Everything is computed first, so an invalid outline changes nothing.
         let mut computed = Vec::new();
-        for id in &ids {
+        for id in ids {
             let mut page = self.session.page(*id).ok_or(EngineError::NoPage(*id))?.clone();
             if let Some(reason) = invalid_reason(&page.corners, &page.sides) {
                 return Err(EngineError::msg(format!("The outline isn't valid: {reason}.")));
@@ -640,35 +598,26 @@ impl Engine {
             computed.push((*id, geometry.proportions, geometry.page_size_mm));
         }
         let pdf = matches!(item.origin, ImportOrigin::PdfPage { .. });
-        let look = self.last_look;
         let mut to_flatten = Vec::new();
         for (id, proportions, size_mm) in computed {
             let Some(page) = self.session.page_mut(id) else { continue };
             page.proportions = Some(proportions);
             page.page_size_mm = Some(size_mm);
             page.sheet = None;
-            page.look = look;
-            page.strength = look.default_strength().unwrap_or(0);
+            // The text was read from the outline the page had.
+            page.text = None;
             if page.flatten != FlattenMode::Off && !pdf && !matches!(page.corners_from, CornerOrigin::FullImage) {
-                // A29 decides in the background, once the page is on screen: the fit and the two
-                // straightenings take a moment, and the page shows with its corners meanwhile.
+                // A29 decides in the background: the fit and the two straightenings take a
+                // moment, and the page shows with its corners meanwhile.
                 to_flatten.push(id);
             }
         }
-        for id in to_flatten {
-            if let Some(page) = self.session.page(id).cloned() {
+        for id in &to_flatten {
+            if let Some(page) = self.session.page(*id).cloned() {
                 self.submit_flatten(&page);
             }
         }
-        // Spreads open in reading order (§4.4).
-        let order = self.settings.get().book_page_order;
-        let first = {
-            let halves: Vec<&Page> = ids.iter().filter_map(|id| self.session.page(*id)).collect();
-            let wanted = if order == PageOrder::RightToLeft { Half::Right } else { Half::Left };
-            halves.iter().find(|p| p.spread.as_ref().is_some_and(|s| s.half == wanted)).or(halves.first()).map(|p| p.id)
-        };
-        let first = first.ok_or(EngineError::NoPhoto(photo))?;
-        if self.settings.get().rotate_upright {
+        if settings.rotate_upright {
             let pages: Vec<Page> = ids
                 .iter()
                 .filter_map(|id| self.session.page(*id))
@@ -679,6 +628,35 @@ impl Engine {
                 self.submit_upright(&p);
             }
         }
+        // The text is read once the page has settled: after the flattening and the turn, which
+        // change the page it is read from.
+        for id in ids {
+            self.ensure_text(*id);
+        }
+        Ok(())
+    }
+
+    /// Done with the crop: the photo's pages are finished in place, and the finished page is shown.
+    fn crop_apply(&mut self, photo: PhotoId) -> Result<(), EngineError> {
+        let item = self.session.photo(photo).cloned().ok_or(EngineError::NoPhoto(photo))?;
+        if item.size == (0, 0) {
+            return Err(EngineError::msg("This photo is still being read."));
+        }
+        let ids = self.page_ids(photo);
+        if ids.is_empty() {
+            return Err(EngineError::msg("This photo has no page yet."));
+        }
+        self.finish_pages(photo, &ids)?;
+        // The user has looked at these pages and said they are right.
+        self.reviewed.extend(ids.iter().copied());
+        // Spreads open in reading order (§4.4).
+        let order = self.settings.get().book_page_order;
+        let first = {
+            let halves: Vec<&Page> = ids.iter().filter_map(|id| self.session.page(*id)).collect();
+            let wanted = if order == PageOrder::RightToLeft { Half::Right } else { Half::Left };
+            halves.iter().find(|p| p.spread.as_ref().is_some_and(|s| s.half == wanted)).or(halves.first()).map(|p| p.id)
+        };
+        let first = first.ok_or(EngineError::NoPhoto(photo))?;
         self.current_photo = Some(photo);
         self.current_page = Some(first);
         self.screen = Screen::Enhance(first);
@@ -693,6 +671,7 @@ impl Engine {
         // The recognised text belongs to the look it was read from only in as far as the page's pixels do.
         let look = page.look;
         self.last_look = look;
+        self.page_failures.remove(&id);
         Ok(())
     }
 
@@ -703,6 +682,29 @@ impl Engine {
         })
     }
 
+    /// The same look and strength on every page, as one step.
+    fn page_set_look_all(&mut self, look: Look, strength: u8) -> Result<(), EngineError> {
+        if self.session.file().pages.is_empty() {
+            return Err(EngineError::msg("There are no pages to change."));
+        }
+        let strength = if look.default_strength().is_some() { strength.min(100) } else { 0 };
+        for page in &mut self.session.file_mut().pages {
+            page.look = look;
+            page.strength = strength;
+        }
+        self.last_look = look;
+        Ok(())
+    }
+
+    /// The user has looked at a flagged page and it is right as it is.
+    fn page_mark_reviewed(&mut self, id: PageId) -> Result<(), EngineError> {
+        if self.session.page(id).is_none() {
+            return Err(EngineError::NoPage(id));
+        }
+        self.reviewed.insert(id);
+        Ok(())
+    }
+
     fn page_rotate(&mut self, id: PageId, quarter_turns: i8) -> Result<(), EngineError> {
         let page = self.session.page_mut(id).ok_or(EngineError::NoPage(id))?;
         page.quarter_turns = (i32::from(page.quarter_turns) + i32::from(quarter_turns)).rem_euclid(4) as u8;
@@ -710,47 +712,27 @@ impl Engine {
         // Text positions belong to the page as it was turned.
         page.text = None;
         self.cancel_page(id);
+        self.ensure_text(id);
         Ok(())
     }
 
+    /// Every page is in the document from the moment its photo has been read, so there is
+    /// nothing to add. The command stays for scripts written for the earlier flow.
     fn page_add(&mut self, id: PageId) -> Result<(), EngineError> {
-        if self.session.in_tray(id) {
-            return Err(EngineError::msg("That page was already added."));
-        }
-        let index = self.session.pending().iter().position(|p| p.id == id).ok_or(EngineError::NoPage(id))?;
-        if self.session.file().pages.len() >= MAX_PAGES {
-            return Err(EngineError::msg(format!("A session holds at most {MAX_PAGES} pages.")));
-        }
-        let page = self.session.pending_mut().remove(index);
-        let (photo, look, strength) = (page.photo, page.look, page.strength);
-        self.session.file_mut().pages.push(page.clone());
-        self.session.file_mut().exported = false;
-        self.submit_recognition(&page);
-        self.last_look = look;
-        // The other half of a spread opens next, on the same look (§4.4).
-        let other = self.session.pending().iter().find(|p| p.photo == photo).map(|p| p.id);
-        if let Some(other) = other {
-            if let Some(p) = self.session.page_mut(other) {
-                p.look = look;
-                p.strength = strength;
-            }
-            self.current_page = Some(other);
-            self.screen = Screen::Enhance(other);
-            return Ok(());
-        }
-        self.screen = self.next_screen_after(Some(photo));
-        Ok(())
+        self.session.page(id).ok_or(EngineError::NoPage(id))?;
+        Err(EngineError::msg("That page is already in the document."))
     }
 
-    /// Where the user goes once a photo is done: the next photo with a page to correct, else the first screen.
-    pub(crate) fn next_screen_after(&mut self, done: Option<PhotoId>) -> Screen {
-        let photos: Vec<PhotoId> = self.session.file().photos.iter().map(|p| p.id).collect();
-        let start = done.and_then(|d| photos.iter().position(|p| *p == d)).map_or(0, |i| i + 1);
-        let next = photos.iter().cycle().skip(start).take(photos.len()).find(|p| Some(**p) != done && !self.pending_ids(**p).is_empty()).copied();
-        match next {
-            Some(photo) => {
+    /// The screen for when what was open is gone: the finished page at `near` in the document, or
+    /// the page before it when that was the last, or the empty window when there are no pages. It
+    /// is never the empty window while the document has pages.
+    pub(crate) fn screen_near(&mut self, near: usize) -> Screen {
+        let pages = &self.session.file().pages;
+        match pages.get(near.min(pages.len().saturating_sub(1))).map(|p| (p.id, p.photo)) {
+            Some((id, photo)) => {
                 self.current_photo = Some(photo);
-                Screen::Crop(photo)
+                self.current_page = Some(id);
+                Screen::Enhance(id)
             }
             None => {
                 self.current_photo = None;
@@ -760,18 +742,54 @@ impl Engine {
         }
     }
 
-    fn page_delete(&mut self, id: PageId) -> Result<(), EngineError> {
-        if self.session.page(id).is_none() {
-            return Err(EngineError::NoPage(id));
+    /// Replaces the screen when the page or photo it shows is gone.
+    pub(crate) fn fix_screen(&mut self, near: usize) {
+        let gone = match self.screen {
+            Screen::Crop(photo) => self.session.photo(photo).is_none() || self.session.pages_of(photo).is_empty(),
+            Screen::Enhance(page) => self.session.page(page).is_none(),
+            Screen::Import | Screen::Export => false,
+        };
+        if gone {
+            self.screen = self.screen_near(near);
         }
+        if self.current_page.is_some_and(|page| self.session.page(page).is_none()) {
+            self.current_page = None;
+        }
+        if self.current_photo.is_some_and(|photo| self.session.photo(photo).is_none()) {
+            self.current_photo = None;
+        }
+    }
+
+    /// Shows the first finished page when the session has pages and nothing is open.
+    pub(crate) fn open_first_page(&mut self) {
+        if self.screen == Screen::Import && !self.session.file().pages.is_empty() {
+            self.screen = self.screen_near(0);
+            if let Some(page) = self.current_page.and_then(|id| self.session.page(id)) {
+                self.last_look = page.look;
+            }
+        }
+    }
+
+    fn page_delete(&mut self, id: PageId) -> Result<(), EngineError> {
+        let page = self.session.page(id).ok_or(EngineError::NoPage(id))?.clone();
+        let at = self.session.file().pages.iter().position(|p| p.id == id).unwrap_or(0);
         self.cancel_page(id);
         self.session.file_mut().pages.retain(|p| p.id != id);
         self.session.pending_mut().retain(|p| p.id != id);
         self.images.retain(|k, _| !image_of(k, id));
         self.image_order.retain(|k| !image_of(k, id));
-        if matches!(self.screen, Screen::Enhance(p) if p == id) || self.current_page == Some(id) {
-            self.current_page = None;
-            self.screen = self.next_screen_after(None);
+        self.reviewed.remove(&id);
+        self.page_failures.remove(&id);
+        for tags in [&mut self.flatten_tags, &mut self.upright_tags, &mut self.text_tags] {
+            tags.remove(&id);
+        }
+        // What was open may be this page: show the one that took its place.
+        self.fix_screen(at);
+        // A photo with no page left, and no reading to wait for, is gone with its last page.
+        let reading = matches!(self.status.get(&page.photo), Some(PhotoStatus::Pending));
+        if self.session.pages_of(page.photo).is_empty() && !reading {
+            self.drop_photo(page.photo);
+            self.names.remove(&page.photo);
         }
         Ok(())
     }
@@ -894,33 +912,39 @@ impl Engine {
     // ---- export ----
 
     fn export_pdf_command(&mut self, path: &str, options: &ExportOptions) -> Result<(), EngineError> {
-        if self.exporting.is_some() {
+        if self.exporting {
             return Err(EngineError::msg("A PDF is already being made."));
         }
         if path.trim().is_empty() {
             return Err(EngineError::msg("Choose where to save the PDF."));
         }
-        // The page on Screen 3 goes into the tray first (§4.4).
-        if let Screen::Enhance(current) = self.screen
-            && !self.session.in_tray(current)
-        {
-            self.page_add(current)?;
+        // Photos still being read have no page yet, and would be left out without a word.
+        let reading = self.status.values().filter(|s| **s == PhotoStatus::Pending).count();
+        if reading > 0 {
+            return Err(EngineError::msg(format!("{} still being read. Export when they are done.", plural(reading, "photo is", "photos are"))));
         }
-        let added = self.session.file().pages.len();
-        if added == 0 {
-            return Err(EngineError::msg("There are no pages to export. Add a page first."));
+        let pages = self.session.file().pages.len();
+        if pages == 0 {
+            return Err(EngineError::msg("There are no pages to export."));
         }
-        let unadded = self.session.file().photos.iter().filter(|p| !self.tray_holds(p.id)).count();
-        if unadded > 0 && !self.export_confirmed {
-            self.export_confirmed = true;
-            let (photos, verb) = (plural(unadded, "photo", "photos"), if unadded == 1 { "hasn't" } else { "haven't" });
-            return Err(EngineError::msg(format!("{photos} {verb} been added. Export the {}?", plural(added, "added page", "added pages"))));
-        }
-        self.export_confirmed = false;
         self.session.file_mut().export = options.clone();
-        self.exporting = Some(self.screen);
-        self.screen = Screen::Export;
+        self.exporting = true;
+        self.export_cancelled = false;
+        self.export_done.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.export_total = pages as u32;
         self.submit_export(PathBuf::from(path));
+        Ok(())
+    }
+
+    /// Stops the export that is running; no file is written.
+    fn export_cancel(&mut self) -> Result<(), EngineError> {
+        if !self.exporting {
+            return Err(EngineError::msg("No PDF is being made."));
+        }
+        self.export_cancelled = true;
+        if let Some(token) = self.tokens.remove(&Target::Export) {
+            token.cancel();
+        }
         Ok(())
     }
 
@@ -960,19 +984,14 @@ impl Engine {
         self.flush();
         let mut session = Session::open(found.dir)?;
         let repairs = session.take_repairs();
+        session.graduate_pending();
         self.replace_session(session);
         for r in repairs {
             self.notify(format!("The saved session was repaired: {r}."), false);
         }
         self.resume();
         self.restore_offer = None;
-        self.screen = match self.session.pending().first() {
-            Some(p) => {
-                self.current_photo = Some(p.photo);
-                Screen::Crop(p.photo)
-            }
-            None => Screen::Import,
-        };
+        self.open_first_page();
         self.book_follow_session();
         Ok(())
     }
@@ -1006,8 +1025,15 @@ impl Engine {
         self.image_order.clear();
         self.want_auto.clear();
         self.names.clear();
-        self.exporting = None;
-        self.export_confirmed = false;
+        self.exporting = false;
+        self.export_cancelled = false;
+        self.last_export = None;
+        self.reviewed.clear();
+        self.page_failures.clear();
+        self.flatten_tags.clear();
+        self.upright_tags.clear();
+        self.text_tags.clear();
+        self.batch_total = 0;
         self.loupe = None;
         self.last_look = Look::ColorDocument;
         self.dirty_again();
