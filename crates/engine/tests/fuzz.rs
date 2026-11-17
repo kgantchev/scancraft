@@ -174,6 +174,16 @@ fn run(seed: u64) {
     let folder = dir.path().to_string_lossy().into_owned();
     let out = dir.join("fuzz.pdf").to_string_lossy().into_owned();
     let mut fuzz = Fuzz { rng: Xorshift64Star::new(seed), pages: Vec::new(), photos: Vec::new(), files, folder, out };
+    // The run starts from one page and one good label. Which commands the fuzzer can aim at a real
+    // page, and so whether any label gets through, otherwise depends on how fast the workers read
+    // the photos: on a loaded machine the loop ended before a page had joined, and the run wrote no
+    // label at all. With the label there from the start, the junk that follows races a file that
+    // exists, which is what the check at the end is about.
+    engine.dispatch(Command::ImportAdd { paths: vec![fuzz.files[0].clone()] }).expect("the first photo imports");
+    settle(&mut engine);
+    let first = engine.view().tray.first().map(|t| t.page).expect("the first photo's page joins");
+    let label = Command::ReferenceLabel { page: first, folder: fuzz.folder.clone(), category: "dark desk".to_string() };
+    engine.dispatch(label).expect("the first label is written");
     let (mut accepted, mut most_pages) = (0usize, 0usize);
     for i in 0..ITERATIONS {
         let command = fuzz.command();
@@ -211,8 +221,8 @@ fn run(seed: u64) {
     // Whatever labels were written, the reference loader reads them: a label file is never left
     // half written or with a record it can't use.
     let label_file = std::path::Path::new(&fuzz.folder).join("reference.json");
-    // Some label must have got through, or this checks nothing; the seeds are fixed, so it does.
-    assert!(label_file.exists(), "no label was written in the whole run");
+    // The run's first label is in it, or this checks nothing.
+    assert!(label_file.exists(), "the label file is gone");
     let set = scancraft_synth::datasets::reference::load(std::path::Path::new(&fuzz.folder)).expect("the label file reads");
     assert!(!set.samples.is_empty(), "the label file holds no usable label");
     assert_eq!(set.skipped_count, 0, "a label the loader skips: {:?}", set.skipped);

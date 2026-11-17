@@ -88,6 +88,16 @@ pub(crate) fn flatten_key(page: &Page) -> String {
     format!("{:?}|{:?}|{:?}|{:?}", page.photo, page.corners, page.sides, page.flatten)
 }
 
+/// What the automatic turn (A15) was decided from: the page's photo, outline and spread half. Not
+/// its fitted sheet or its look: the flattening is decided at the same time as the turn, and
+/// whichever finishes first changes the sheet, but a page's orientation is the same flat or
+/// flattened. Checking the turn against the whole render key dropped it whenever the flattening
+/// came back first, so the page was turned or not by which job the workers finished first, and one
+/// thread and eight did not give the same page.
+pub(crate) fn upright_key(page: &Page) -> String {
+    format!("{:?}|{:?}|{:?}|{:?}", page.photo, page.corners, page.sides, page.spread)
+}
+
 impl Engine {
     pub(crate) fn ctx(&self) -> Ctx {
         Ctx { cache: self.cache.clone(), sources: self.session.sources_dir(), services: self.services.clone(), settings: self.settings.get().clone() }
@@ -301,8 +311,9 @@ impl Engine {
         let token = self.token(Target::Page(page.id));
         let ctx = self.ctx();
         let page = page.clone();
-        let for_key = text_key(&page);
-        let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["upright", &for_key]), ..JobMeta::default() };
+        let for_key = upright_key(&page);
+        // The job is one of its page's as it is now, so its tag keeps the whole render in it.
+        let meta = JobMeta { page: Some(page.id), photo: Some(page.photo), tag: tag_of(&["upright", &text_key(&page)]), ..JobMeta::default() };
         let id = page.id;
         self.upright_tags.insert(id, meta.tag);
         self.submit_job(
@@ -530,7 +541,7 @@ impl Engine {
                     self.notify(n, false);
                 }
                 let Some(p) = self.session.page_mut(page) else { return false };
-                if text_key(p) != for_key || p.turns_from != TurnOrigin::Auto || p.quarter_turns != 0 {
+                if upright_key(p) != for_key || p.turns_from != TurnOrigin::Auto || p.quarter_turns != 0 {
                     return false;
                 }
                 if let Some(t) = turns.filter(|t| *t != 0) {

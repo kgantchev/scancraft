@@ -457,6 +457,52 @@ fn the_original_preview_is_the_page_without_its_filter() {
 }
 
 #[test]
+fn the_engine_is_busy_until_a_finished_job_has_been_applied() {
+    // A job's result is applied by `poll`, and applying it queues what comes next: the page joins
+    // the document, is turned upright, flattened and read. `busy` went false as soon as the last
+    // worker finished, before `poll` had applied that result, so anyone who waited for "not busy"
+    // could stop with the pipeline half done: a PDF with a page unfinished, on a slow machine.
+    let dir = TempDir::new("busy-until-applied");
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(&dir, services(quad));
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    // Time for the workers to finish, and no `poll`: nothing they made has been applied.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(engine.view().busy, "the engine says it is idle while a result is waiting to be applied");
+    settle(&mut engine);
+    assert!(!engine.view().busy);
+    assert_eq!(engine.view().tray.len(), 1, "the page did not join the document");
+}
+
+#[test]
+fn the_automatic_turn_is_kept_when_the_flattening_finishes_before_it() {
+    // The turn is decided from the page as it was when the page joined, and the flattening that is
+    // decided at the same time changes the page's sheet. The turn was dropped as stale whenever the
+    // flattening came back first, so whether a page was turned depended on which of the two the
+    // workers finished first: one thread and eight made different pages. Here the turn is held back
+    // until the flattening has landed, which is the order that lost it.
+    let dir = TempDir::new("turn-after-flatten");
+    let (bytes, quad) = flat_fixture();
+    let (release, gate) = std::sync::mpsc::channel();
+    let mut services = services(quad);
+    services.upright = Some(Arc::new(GatedHalfTurn { gate: std::sync::Mutex::new(gate) }));
+    let mut engine = open_with(dir.path(), "Scan A", services, 2);
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.session().file().pages.first().is_none_or(|p| p.sheet.is_none()) {
+        assert!(std::time::Instant::now() < end, "the flattening never came back");
+        engine.poll();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(engine.session().file().pages[0].quarter_turns, 0, "the turn came back before it was released");
+    release.send(()).unwrap();
+    settle(&mut engine);
+    assert_eq!(engine.session().file().pages[0].quarter_turns, 2, "the turn was dropped because the flattening came back first");
+}
+
+#[test]
 fn the_original_preview_does_not_depend_on_the_number_of_threads() {
     let (bytes, quad) = flat_fixture();
     let mut pictures = Vec::new();

@@ -6,7 +6,7 @@ use scancraft_core::engine_api::{EngineApi, Notice};
 use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::{Gray8, Rgb8};
 use scancraft_core::recipe::{PageId, PhotoId, RecognizedText, TextLine, Word};
-use scancraft_core::traits::{PageDetector, RecognizeOptions, Recognizer, ServiceError};
+use scancraft_core::traits::{PageDetector, RecognizeOptions, Recognizer, ServiceError, UprightVote, UprightVoter};
 use scancraft_engine::{Engine, EngineOptions, Services};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -185,6 +185,21 @@ impl Recognizer for GatedWord {
             let _ = gate.recv_timeout(Duration::from_secs(20));
         }
         OneWord.recognize(page, options)
+    }
+}
+
+/// An upright voter that holds its job until it is released, then votes, surely, for a half turn.
+/// It lets a test finish the page's other background work first.
+pub struct GatedHalfTurn {
+    pub gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl UprightVoter for GatedHalfTurn {
+    fn vote(&self, _: &Gray8) -> Result<UprightVote, ServiceError> {
+        if let Ok(gate) = self.gate.lock() {
+            let _ = gate.recv_timeout(Duration::from_secs(20));
+        }
+        Ok(UprightVote { score: [0.0, 0.0, 10.0, 0.0], chars: [0, 0, 100, 0] })
     }
 }
 

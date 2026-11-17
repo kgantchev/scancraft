@@ -10,7 +10,7 @@ use scancraft_core::recipe::{PageId, PhotoId};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -154,6 +154,8 @@ pub struct JobRunner<T: Send + 'static> {
     results: Receiver<JobDone<T>>,
     inline_tx: Sender<JobDone<T>>,
     scheduler: Option<JoinHandle<()>>,
+    /// Jobs submitted whose results [`JobRunner::drain`] has not handed over yet.
+    unclaimed: AtomicUsize,
 }
 
 impl<T: Send + 'static> JobRunner<T> {
@@ -170,11 +172,12 @@ impl<T: Send + 'static> JobRunner<T> {
                 let shared = shared.clone();
                 std::thread::Builder::new().name("scancraft-scheduler".to_string()).spawn(move || schedule(&shared, &pool, threads, &tx)).ok()
             });
-        JobRunner { shared, results, inline_tx, scheduler: started }
+        JobRunner { shared, results, inline_tx, scheduler: started, unclaimed: AtomicUsize::new(0) }
     }
 
     /// Queues a job.
     pub fn submit(&self, job: Job<T>) {
+        self.unclaimed.fetch_add(1, Ordering::SeqCst);
         if self.scheduler.is_none() {
             // No scheduler: run it here, unless it is already cancelled.
             let Job { token, meta, work, .. } = job;
@@ -198,13 +201,27 @@ impl<T: Send + 'static> JobRunner<T> {
 
     /// Takes every finished result, without blocking.
     pub fn drain(&self) -> Vec<JobDone<T>> {
-        self.results.try_iter().collect()
+        let done: Vec<JobDone<T>> = self.results.try_iter().collect();
+        // Every result is of a job `submit` counted before it ran, so this cannot go below 0.
+        self.unclaimed.fetch_sub(done.len(), Ordering::SeqCst);
+        done
     }
 
     /// Queued and running jobs.
     pub fn pending(&self) -> usize {
         let state = self.shared.lock();
         state.heap.len() + state.running
+    }
+
+    /// Jobs whose results the caller has not taken yet: those queued and running, and those that
+    /// have finished and are waiting in the channel.
+    ///
+    /// [`JobRunner::pending`] reaches 0 the moment the last worker finishes, before the caller
+    /// has taken its result, and applying a result may submit more jobs. A caller that wants to
+    /// know whether any work is left asks this: it is 0 only once every result has been taken, and
+    /// a caller that submits follow-on jobs while it applies them has done so before it asks.
+    pub fn unclaimed(&self) -> usize {
+        self.unclaimed.load(Ordering::SeqCst)
     }
 
     /// Waits up to `timeout` for the queue to empty and returns whether it did (for tests and shutdown).
@@ -307,6 +324,23 @@ mod tests {
     fn order(runner: &JobRunner<u32>) -> Vec<u32> {
         assert!(runner.wait_idle(Duration::from_secs(10)));
         runner.drain().into_iter().filter_map(|d| d.outcome.ok()).filter(|n| *n != 0).collect()
+    }
+
+    #[test]
+    fn a_finished_job_still_counts_until_its_result_is_taken() {
+        // `pending` is 0 as soon as the worker is done, with the result still in the channel; a
+        // caller that decides from it that no work is left can stop before it has applied the
+        // result, and applying it may queue more.
+        let runner = JobRunner::<u32>::new(1);
+        runner.submit(job(JobPriority::Render, 7));
+        assert!(runner.wait_idle(Duration::from_secs(10)));
+        assert_eq!(runner.pending(), 0);
+        assert_eq!(runner.unclaimed(), 1);
+        assert_eq!(runner.drain().len(), 1);
+        assert_eq!(runner.unclaimed(), 0);
+        // Draining nothing takes nothing off the count, and it never goes below 0.
+        assert!(runner.drain().is_empty());
+        assert_eq!(runner.unclaimed(), 0);
     }
 
     #[test]

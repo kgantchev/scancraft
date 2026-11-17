@@ -32,7 +32,7 @@ impl Engine {
             book_spreads: file.book_spreads,
             can_undo: self.undo.can_undo(),
             can_redo: self.undo.can_redo(),
-            busy: self.jobs.pending() > 0,
+            busy: self.jobs.unclaimed() > 0,
             notices: self.visible_notices.clone(),
             restore_offer: self.restore_offer,
             importing: self.importing(),

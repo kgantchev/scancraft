@@ -436,13 +436,13 @@ impl Engine {
         self.mark_dirty();
     }
 
-    /// Waits for the job queue to empty, applying results as they come; true when it emptied in time.
+    /// Waits until no work is left, applying results as they come (and the jobs they queue in turn);
+    /// true when that happened in time.
     pub fn wait_idle(&mut self, timeout: std::time::Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
             self.poll();
-            if self.jobs.pending() == 0 {
-                self.poll();
+            if self.jobs.unclaimed() == 0 {
                 return true;
             }
             if Instant::now() >= deadline {
