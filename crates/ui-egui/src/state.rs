@@ -258,8 +258,11 @@ pub struct UiState {
     pub textures: HashMap<ImageKey, Texture>,
     /// The tray's drag: the index it started at and the index it is over.
     pub tray_drag: Option<(u32, u32)>,
-    /// The tray's selected page.
-    pub tray_selected: Option<PageId>,
+    /// The pages selected together in the sidebar (⌘-click, Shift-click, Select All). Fewer than
+    /// two is no selection: Rotate, Delete and the filters then act on the open page alone.
+    pub selected_pages: Vec<PageId>,
+    /// Where a Shift-click's range starts: the page last clicked.
+    pub selection_anchor: Option<PageId>,
     /// The edge handle being dragged, when there is one.
     pub edge_drag: Option<EdgeDrag>,
     /// The loupe's texture: the crop it was made of, and the texture itself.
@@ -345,7 +348,8 @@ impl UiState {
             engine_notices_seen: Vec::new(),
             textures: HashMap::new(),
             tray_drag: None,
-            tray_selected: None,
+            selected_pages: Vec::new(),
+            selection_anchor: None,
             edge_drag: None,
             loupe_texture: None,
             actions: Vec::new(),

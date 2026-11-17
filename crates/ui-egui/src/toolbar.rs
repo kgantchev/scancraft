@@ -73,24 +73,16 @@ impl Action {
         }
     }
 
-    /// Does it.
+    /// Does it: to the pages selected together when there are several, else to the open page.
     pub fn run(self, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-        let page = sidebar::current_page(view);
+        let pages = sidebar::targets(state, view);
         match self {
             Action::Add => state.actions.push(UiAction::ImportFiles),
             Action::RotateLeft | Action::RotateRight => {
-                if let Some(page) = page {
-                    let quarter_turns = if self == Action::RotateLeft { -1 } else { 1 };
-                    dispatch(state, engine, Command::PageRotate { page, quarter_turns });
-                }
+                let quarter_turns = if self == Action::RotateLeft { -1 } else { 1 };
+                sidebar::rotate_pages(state, engine, &pages, quarter_turns);
             }
-            Action::Delete => {
-                if let Some(page) = page
-                    && let Some(number) = view.tray.iter().find(|item| item.page == page).map(|item| item.number)
-                {
-                    sidebar::delete_page(state, engine, page, number);
-                }
-            }
+            Action::Delete => sidebar::delete_pages(state, view, engine, &pages),
             Action::Undo => {
                 dispatch(state, engine, Command::EditUndo);
             }

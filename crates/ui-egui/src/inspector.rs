@@ -40,6 +40,12 @@ fn filter_inspector(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: 
     let page = enhance.page;
     let title = state.text.t("Filter");
     ui.heading(title);
+    // With several pages selected, the filters are for all of them: say so.
+    let pages = crate::sidebar::targets(state, view);
+    if pages.len() >= 2 {
+        let selected = state.text.trn(pages.len() as u64, "{n} page selected", "{n} pages selected");
+        ui.label(egui::RichText::new(selected).small().color(theme::accent(ui.visuals().dark_mode)));
+    }
     ui.add_space(6.0);
     filter_list(ui, state, view, engine);
 
@@ -50,13 +56,19 @@ fn filter_inspector(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: 
         let response = ui.add(egui::Slider::new(&mut strength, 0.0..=100.0).text(heading));
         // The slider moves with the arrow keys while it has the focus: they are not for the filters.
         state.keys_taken |= response.has_focus();
+        let set = |state: &mut UiState, engine: &mut dyn EngineApi, value: u8| {
+            if pages.len() >= 2 {
+                dispatch(state, engine, Command::PageSetLookMany { pages: pages.clone(), look: enhance.look, strength: value });
+            } else {
+                dispatch(state, engine, Command::PageSetStrength { page, value });
+            }
+        };
         if response.changed() {
-            let value = strength.clamp(0.0, 100.0).round() as u8;
-            dispatch(state, engine, Command::PageSetStrength { page, value });
+            set(state, engine, strength.clamp(0.0, 100.0).round() as u8);
         }
         // A double-click puts the strength back to where the filter starts.
         if response.double_clicked() {
-            dispatch(state, engine, Command::PageSetStrength { page, value: default });
+            set(state, engine, default);
         }
     }
 

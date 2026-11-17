@@ -46,6 +46,11 @@ pub fn status_bar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &m
         ui.add_space(12.0);
         ui.spacing_mut().item_spacing.x = 16.0;
         ui.label(small(state.text.trn(view.tray.len() as u64, "{n} page", "{n} pages")));
+        // Several pages selected together: what Rotate, Delete and the filters will act on.
+        let selected = crate::sidebar::targets(state, view).len();
+        if selected >= 2 {
+            ui.label(small(state.text.trn(selected as u64, "{n} page selected", "{n} pages selected")).color(theme::accent(ui.visuals().dark_mode)));
+        }
         // Background work, with something that moves.
         let mut work: Vec<(&str, Progress)> = Vec::new();
         if let Some(p) = view.importing {

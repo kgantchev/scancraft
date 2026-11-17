@@ -4,8 +4,9 @@
 //! A thumbnail keeps the page's own shape and shows its number. A spinner marks a page still being
 //! prepared, an amber dot one whose edges need a look, and a red mark one that could not be made.
 //! Photos still being read have a placeholder at the end of the list. A click opens the page in the
-//! view the window is in (the finished page, or Crop); a drag moves it, with a line where it will
-//! land; the context menu offers Crop, Rotate and Delete.
+//! view the window is in (the finished page, or Crop); ⌘-click and Shift-click select several
+//! pages, which Rotate, Delete and the filters then act on together; a drag moves a page, with a
+//! line where it will land; the context menu offers Crop, Rotate and Delete.
 
 use egui::{Color32, Key, Pos2, Rect, Sense, TextureOptions, Ui, Vec2};
 
@@ -91,6 +92,82 @@ pub fn next_flagged(view: &ViewState, forward: bool) -> Option<PageId> {
     view.tray.get(at).map(|item| item.page)
 }
 
+/// The pages Rotate, Delete and the filters act on: the pages selected together, when there are
+/// two or more of them, and otherwise the page that is open. In the order of the document.
+pub fn targets(state: &UiState, view: &ViewState) -> Vec<PageId> {
+    let selected: Vec<PageId> = view.tray.iter().filter(|item| state.selected_pages.contains(&item.page)).map(|item| item.page).collect();
+    if selected.len() >= 2 {
+        return selected;
+    }
+    current_page(view).into_iter().collect()
+}
+
+/// Whether Rotate, Delete and the filters now act on several pages.
+pub fn is_batch(state: &UiState, view: &ViewState) -> bool {
+    targets(state, view).len() >= 2
+}
+
+/// Drops from the selection the pages that are no longer in the document, and the selection itself
+/// once it is down to one page: that is the page that is open.
+pub fn prune_selection(state: &mut UiState, view: &ViewState) {
+    state.selected_pages.retain(|page| view.tray.iter().any(|item| item.page == *page));
+    if state.selected_pages.len() < 2 {
+        state.selected_pages.clear();
+    }
+    if state.selection_anchor.is_some_and(|page| !view.tray.iter().any(|item| item.page == page)) {
+        state.selection_anchor = None;
+    }
+}
+
+/// Selects every page (Select All).
+pub fn select_all(state: &mut UiState, view: &ViewState) {
+    state.selected_pages = view.tray.iter().map(|item| item.page).collect();
+    state.selection_anchor = current_page(view);
+}
+
+/// Lets go of the selection.
+pub fn clear_selection(state: &mut UiState) {
+    state.selected_pages.clear();
+}
+
+/// The pages from `a` to `b` in the order of the document, both included, whichever comes first.
+pub fn range_between(view: &ViewState, a: PageId, b: PageId) -> Vec<PageId> {
+    let (Some(from), Some(to)) = (view.tray.iter().position(|i| i.page == a), view.tray.iter().position(|i| i.page == b)) else {
+        return Vec::new();
+    };
+    let (low, high) = (from.min(to), from.max(to));
+    view.tray[low..=high].iter().map(|item| item.page).collect()
+}
+
+/// What a click on a page does, by the keys held: a plain click opens the page and lets go of the
+/// selection; ⌘-click adds the page to the selection, or takes it out; Shift-click selects every
+/// page from the one last clicked to this one.
+pub fn click(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, page: PageId, modifiers: egui::Modifiers) {
+    if modifiers.command {
+        // The page that is open is part of the selection it is added to.
+        if state.selected_pages.is_empty()
+            && let Some(open) = current_page(view)
+        {
+            state.selected_pages.push(open);
+        }
+        match state.selected_pages.iter().position(|p| *p == page) {
+            Some(at) => {
+                state.selected_pages.remove(at);
+            }
+            None => state.selected_pages.push(page),
+        }
+        state.selection_anchor = Some(page);
+    } else if modifiers.shift {
+        let anchor = state.selection_anchor.or_else(|| current_page(view)).unwrap_or(page);
+        state.selected_pages = range_between(view, anchor, page);
+    } else {
+        state.selected_pages.clear();
+        state.selection_anchor = Some(page);
+        open_page(state, view, engine, page);
+    }
+    prune_selection(state, view);
+}
+
 /// Opens a page in the view the window is in.
 pub fn open_page(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, page: PageId) {
     match mode_of(view) {
@@ -110,11 +187,13 @@ pub fn sidebar(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut 
             let (cell, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), THUMB_BOX.y + GAP), Sense::hover());
             let thumb_box = Rect::from_center_size(Pos2::new(cell.center().x, cell.min.y + THUMB_BOX.y / 2.0), THUMB_BOX);
             rects.push(cell);
-            draw_thumbnail(ui, state, item, thumb_box, open.contains(&item.page), engine);
+            let ringed = open.contains(&item.page) || state.selected_pages.contains(&item.page);
+            draw_thumbnail(ui, state, item, thumb_box, ringed, engine);
             let id = ui.make_persistent_id(("scancraft.page", item.page));
             let response = ui.interact(cell, id, Sense::click_and_drag());
             let label = page_label(state, item);
-            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open.contains(&item.page), label.clone()));
+            let on = open.contains(&item.page) || state.selected_pages.contains(&item.page);
+            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, label.clone()));
             responses.push(response);
         }
         placeholders(ui, state, view);
@@ -238,29 +317,35 @@ fn handle_page(
             }
         }
     } else if response.clicked() {
-        open_page(state, view, engine, item.page);
+        let modifiers = ui.input(|i| i.modifiers);
+        click(state, view, engine, item.page, modifiers);
     }
     let page = item.page;
-    let number = item.number;
+    // Like the Finder: the menu of a page that is in the selection is for the selection, and the
+    // menu of any other page is for that page alone.
+    let selection: Vec<PageId> = view.tray.iter().filter(|i| state.selected_pages.contains(&i.page)).map(|i| i.page).collect();
+    let several = selection.len() >= 2 && selection.contains(&page);
+    let acts_on: Vec<PageId> = if several { selection.clone() } else { vec![page] };
     response.context_menu(|ui| {
-        if ui.button(state.text.t("Crop")).clicked() {
+        if !several && ui.button(state.text.t("Crop")).clicked() {
             dispatch(state, engine, Command::PageOpenCrop { page });
             ui.close();
         }
         if ui.button(state.text.t("Rotate Left")).clicked() {
-            dispatch(state, engine, Command::PageRotate { page, quarter_turns: -1 });
+            rotate_pages(state, engine, &acts_on, -1);
             ui.close();
         }
         if ui.button(state.text.t("Rotate Right")).clicked() {
-            dispatch(state, engine, Command::PageRotate { page, quarter_turns: 1 });
+            rotate_pages(state, engine, &acts_on, 1);
             ui.close();
         }
-        if needs_look(item) && ui.button(state.text.t("This Page Is Fine")).clicked() {
+        if !several && needs_look(item) && ui.button(state.text.t("This Page Is Fine")).clicked() {
             dispatch(state, engine, Command::PageMarkReviewed { page });
             ui.close();
         }
-        if ui.button(state.text.t("Delete")).clicked() {
-            delete_page(state, engine, page, number);
+        let delete = if several { state.text.trn(selection.len() as u64, "Delete {n} Page", "Delete {n} Pages") } else { state.text.t("Delete") };
+        if ui.button(delete).clicked() {
+            delete_pages(state, view, engine, &acts_on);
             ui.close();
         }
     });
@@ -283,16 +368,48 @@ fn gap_rect(rects: &[Rect], at: u32) -> Option<Rect> {
     Some(Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y)))
 }
 
-/// The Delete key removes the open page, with an Undo on screen (§4.5). The caller holds it back
-/// while a window of the interface is open.
+/// The Delete key removes the selected pages, or the open page (§4.5), with an Undo on screen. The
+/// caller holds it back while a window of the interface is open.
 pub fn delete_key(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
     let pressed = ui.input(|i| i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete));
     if !pressed {
         return;
     }
-    let Some(page) = current_page(view) else { return };
-    let Some(number) = view.tray.iter().find(|item| item.page == page).map(|item| item.number) else { return };
-    delete_page(state, engine, page, number);
+    let pages = targets(state, view);
+    delete_pages(state, view, engine, &pages);
+}
+
+/// Turns pages, one command for however many.
+pub fn rotate_pages(state: &mut UiState, engine: &mut dyn EngineApi, pages: &[PageId], quarter_turns: i8) {
+    match pages {
+        [] => {}
+        [page] => {
+            dispatch(state, engine, Command::PageRotate { page: *page, quarter_turns });
+        }
+        many => {
+            dispatch(state, engine, Command::PageRotateMany { pages: many.to_vec(), quarter_turns });
+        }
+    }
+}
+
+/// Deletes pages and says so, with an Undo: nothing else on the screen says that a page has gone.
+/// Several pages are one command and one Undo.
+pub fn delete_pages(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, pages: &[PageId]) {
+    match pages {
+        [] => {}
+        [page] => {
+            if let Some(number) = view.tray.iter().find(|item| item.page == *page).map(|item| item.number) {
+                delete_page(state, engine, *page, number);
+            }
+        }
+        many => {
+            if dispatch(state, engine, Command::PageDeleteMany { pages: many.to_vec() }) {
+                let text = state.text.trn(many.len() as u64, "{n} page deleted", "{n} pages deleted");
+                state.toast_with_undo(text);
+                clear_selection(state);
+            }
+        }
+    }
 }
 
 /// Deletes a page and says so, with an Undo: nothing else on the screen says that a page has gone.
@@ -300,6 +417,7 @@ pub fn delete_page(state: &mut UiState, engine: &mut dyn EngineApi, page: PageId
     if dispatch(state, engine, Command::PageDelete { page }) {
         let text = state.text.t("Page {n} deleted").replace("{n}", &number.to_string());
         state.toast_with_undo(text);
+        state.selected_pages.retain(|p| *p != page);
     }
 }
 
@@ -330,5 +448,59 @@ mod tests {
         let end = gap_rect(&rects, 2).expect("a line");
         assert!(end.min.y >= rects[1].max.y - GAP, "{end:?}");
         assert!(gap_rect(&[], 0).is_none());
+    }
+
+    fn view_of(n: u64) -> ViewState {
+        use scancraft_core::engine_api::Screen;
+        use scancraft_core::recipe::PhotoId;
+        let mut view = crate::fake_engine::empty_view();
+        view.tray =
+            (1..=n).map(|i| TrayItem { page: PageId(i), photo: PhotoId(i), number: i as u32, text_ready: true, state: PageState::Ready }).collect();
+        view.screen = Screen::Enhance(PageId(1));
+        view.enhance = Some(scancraft_core::engine_api::EnhanceView {
+            page: PageId(1),
+            look: scancraft_core::recipe::Look::ColorDocument,
+            strength: 60,
+            quarter_turns: 0,
+            turned_automatically: false,
+            flattened_automatically: false,
+            half: None,
+            low_resolution: false,
+            more_to_come: false,
+        });
+        view
+    }
+
+    #[test]
+    fn a_range_runs_between_two_pages_whichever_comes_first() {
+        let view = view_of(5);
+        assert_eq!(range_between(&view, PageId(2), PageId(4)), vec![PageId(2), PageId(3), PageId(4)]);
+        assert_eq!(range_between(&view, PageId(4), PageId(2)), vec![PageId(2), PageId(3), PageId(4)]);
+        assert_eq!(range_between(&view, PageId(3), PageId(3)), vec![PageId(3)]);
+        assert!(range_between(&view, PageId(3), PageId(99)).is_empty());
+    }
+
+    #[test]
+    fn one_selected_page_is_no_selection_and_the_targets_are_the_open_page() {
+        let view = view_of(4);
+        let mut state = UiState::new();
+        assert_eq!(targets(&state, &view), vec![PageId(1)]);
+        state.selected_pages = vec![PageId(3)];
+        assert_eq!(targets(&state, &view), vec![PageId(1)], "one page selected is the open page's business");
+        state.selected_pages = vec![PageId(4), PageId(2)];
+        assert_eq!(targets(&state, &view), vec![PageId(2), PageId(4)], "in the order of the document");
+        assert!(is_batch(&state, &view));
+    }
+
+    #[test]
+    fn pages_that_are_gone_leave_the_selection_and_a_selection_of_one_is_none() {
+        let mut view = view_of(4);
+        let mut state = UiState::new();
+        state.selected_pages = vec![PageId(1), PageId(2), PageId(4)];
+        state.selection_anchor = Some(PageId(4));
+        view.tray.retain(|item| item.page != PageId(4) && item.page != PageId(2));
+        prune_selection(&mut state, &view);
+        assert!(state.selected_pages.is_empty(), "{:?}", state.selected_pages);
+        assert_eq!(state.selection_anchor, None);
     }
 }

@@ -131,11 +131,18 @@ pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
     }
 }
 
-/// Applies the filter of the list's index (§4.4).
+/// Applies the filter of the list's index (§4.4): to the pages selected together when there are
+/// several, which start at the filter's own strength, else to the open page.
 pub fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, index: usize) {
     let Some(enhance) = view.enhance.as_ref() else { return };
     let Some(look) = LOOKS.get(index).copied() else { return };
-    canvas::dispatch(state, engine, Command::PageSetLook { page: enhance.page, look });
+    let pages = crate::sidebar::targets(state, view);
+    if pages.len() >= 2 {
+        let strength = look.default_strength().unwrap_or(0);
+        canvas::dispatch(state, engine, Command::PageSetLookMany { pages, look, strength });
+    } else {
+        canvas::dispatch(state, engine, Command::PageSetLook { page: enhance.page, look });
+    }
 }
 
 /// The keyboard of the finished page: up and down move through the filters, the number keys pick

@@ -494,6 +494,7 @@ fn the_menu_bar_has_the_items_of_the_specification() {
         "Undo",
         "Redo",
         "Delete Page",
+        "Select All",
         "Crop",
         "Reset to Detected Edges",
         "Use Whole Photo",
@@ -524,6 +525,7 @@ fn the_menu_bar_has_the_items_of_the_specification() {
     assert_eq!(shortcut_of("Add Pages…").as_deref(), Some("⌘O"));
     assert_eq!(shortcut_of("Export PDF…").as_deref(), Some("⌘E"));
     assert_eq!(shortcut_of("Undo").as_deref(), Some("⌘Z"));
+    assert_eq!(shortcut_of("Select All").as_deref(), Some("⌘A"));
     assert_eq!(shortcut_of("Split into Two Pages").as_deref(), Some("⌥⌘B"));
     assert_eq!(shortcut_of("Show Pages").as_deref(), Some("⌥⌘T"));
     assert_eq!(shortcut_of("Show Inspector").as_deref(), Some("⌥⌘I"));
@@ -568,6 +570,11 @@ fn a_menu_item_is_live_only_when_it_can_act() {
     let mut by_hand = crop_view();
     by_hand.crop.as_mut().expect("the crop view").auto_detect = false;
     assert!(item_enabled("crop.auto", &by_hand));
+    // Select All needs pages to select among: two or more.
+    assert!(!item_enabled("edit.select_all", &import) && item_enabled("edit.select_all", &crop));
+    let mut one = enhance_view();
+    one.tray.truncate(1);
+    assert!(!item_enabled("edit.select_all", &one));
     // The finished page: a filter and Crop act, the crop items do not.
     let enhance = enhance_view();
     for id in ["page.set_look", "page.open_crop", "page.rotate", "export.pdf"] {
@@ -2240,4 +2247,124 @@ fn settings_light_snapshot() {
 #[test]
 fn settings_dark_snapshot() {
     settings_snapshot(egui::Theme::Dark, "settings_dark");
+}
+
+// ----------------------------------------------------------- several pages at once
+
+/// Clicks a widget with the given label while `modifiers` are held.
+fn click_label_with(harness: &mut Harness<TestState>, label: &str, modifiers: egui::Modifiers) {
+    let bounds = bounds_of(harness, label);
+    let pos = bounds.center();
+    harness.event(egui::Event::ModifiersChanged(modifiers));
+    harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.run();
+}
+
+const COMMAND: egui::Modifiers = egui::Modifiers { command: true, ctrl: false, alt: false, shift: false, mac_cmd: true };
+const SHIFT: egui::Modifiers = egui::Modifiers { shift: true, ..egui::Modifiers::NONE };
+
+fn selected(harness: &Harness<TestState>, label: &str) -> bool {
+    harness.query_all_by_label(label).next().is_some_and(|n| n.accesskit_node().data().toggled() == Some(egui::accesskit::Toggled::True))
+}
+
+#[test]
+fn command_click_selects_more_pages_and_a_plain_click_lets_go() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    assert!(selected(&harness, "Page 1") && !selected(&harness, "Page 3"));
+    click_label_with(&mut harness, "Page 3", COMMAND);
+    // The open page is in the selection it was added to; and nothing was opened.
+    assert!(selected(&harness, "Page 1") && selected(&harness, "Page 3") && !selected(&harness, "Page 2"));
+    assert!(dispatched(&harness).is_empty(), "a selecting click opened a page: {:?}", dispatched(&harness));
+    assert!(shown_text(&harness).contains("2 pages selected"), "{}", shown_text(&harness));
+    // A second command-click on a selected page takes it out again.
+    click_label_with(&mut harness, "Page 3", COMMAND);
+    assert!(!selected(&harness, "Page 3"));
+    assert!(!shown_text(&harness).contains("pages selected"));
+    // And a plain click opens the page and lets go of whatever was selected.
+    click_label_with(&mut harness, "Page 2", COMMAND);
+    click_label(&mut harness, "Page 3");
+    assert_eq!(dispatched(&harness), vec![Command::PageEdit { page: PageId(12) }]);
+    assert!(!shown_text(&harness).contains("pages selected"));
+}
+
+#[test]
+fn shift_click_selects_the_pages_between() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label_with(&mut harness, "Page 3", SHIFT);
+    for page in ["Page 1", "Page 2", "Page 3"] {
+        assert!(selected(&harness, page), "{page} is not selected after a Shift-click from the open page to the last");
+    }
+    assert!(shown_text(&harness).contains("3 pages selected"));
+}
+
+#[test]
+fn rotate_and_delete_act_on_the_selected_pages_in_one_command_each() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label_with(&mut harness, "Page 3", COMMAND);
+    click_label(&mut harness, "Rotate Right");
+    assert_eq!(dispatched(&harness), vec![Command::PageRotateMany { pages: vec![PAGE, PageId(12)], quarter_turns: 1 }]);
+    harness.state_mut().1.clear();
+    click_label(&mut harness, "Delete");
+    assert_eq!(dispatched(&harness), vec![Command::PageDeleteMany { pages: vec![PAGE, PageId(12)] }]);
+    // One toast, one Undo, for the lot; and the selection is let go of.
+    assert!(shown_text(&harness).contains("2 pages deleted"), "{}", shown_text(&harness));
+    assert!(!shown_text(&harness).contains("pages selected"));
+}
+
+#[test]
+fn the_delete_key_deletes_the_selected_pages() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label_with(&mut harness, "Page 2", COMMAND);
+    harness.key_press(egui::Key::Backspace);
+    harness.run();
+    assert_eq!(dispatched(&harness), vec![Command::PageDeleteMany { pages: vec![PAGE, PageId(11)] }]);
+}
+
+#[test]
+fn a_filter_for_the_selected_pages_is_one_command() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label_with(&mut harness, "Page 2", SHIFT);
+    click_label(&mut harness, "Grayscale filter");
+    let commands = dispatched(&harness);
+    assert_eq!(commands, vec![Command::PageSetLookMany { pages: vec![PAGE, PageId(11)], look: Look::Grayscale, strength: 60 }]);
+    // The inspector says what the filters are for.
+    assert!(shown_text(&harness).contains("2 pages selected"));
+}
+
+#[test]
+fn select_all_selects_every_page_from_the_menu_and_the_keyboard() {
+    let mut menu = harness(enhance_view(), egui::Theme::Light);
+    menu.run();
+    let (ui, engine) = menu.state_mut();
+    ui.run_menu_command(&craft_menu::CommandRef::new(scancraft_ui_egui::menu::SELECT_ALL), engine);
+    menu.run();
+    assert!(shown_text(&menu).contains("3 pages selected"), "{}", shown_text(&menu));
+    let mut keyboard = harness(enhance_view(), egui::Theme::Light);
+    keyboard.run();
+    keyboard.key_press_modifiers(COMMAND, egui::Key::A);
+    keyboard.run();
+    assert!(shown_text(&keyboard).contains("3 pages selected"), "{}", shown_text(&keyboard));
+    // Escape lets go.
+    keyboard.key_press(egui::Key::Escape);
+    keyboard.run();
+    assert!(!shown_text(&keyboard).contains("pages selected"));
+}
+
+#[test]
+fn the_menus_rotate_and_delete_act_on_the_selection_too() {
+    let mut harness = harness(enhance_view(), egui::Theme::Light);
+    harness.run();
+    click_label_with(&mut harness, "Page 3", COMMAND);
+    let bar = scancraft_ui_egui::build_menu_bar(&enhance_view());
+    let rotate = bar.items().into_iter().find(|item| item.label == "Rotate Left").expect("Rotate Left");
+    let (ui, engine) = harness.state_mut();
+    ui.run_menu_command(&rotate.command, engine);
+    assert_eq!(dispatched(&harness), vec![Command::PageRotateMany { pages: vec![PAGE, PageId(12)], quarter_turns: -1 }]);
 }

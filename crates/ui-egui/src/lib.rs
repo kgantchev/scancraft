@@ -53,6 +53,7 @@ impl ScanCraftUi {
         }
         self.state.keys_taken = false;
         self.state.show_original = false;
+        sidebar::prune_selection(&mut self.state, &view);
         self.take_engine_notices(&view);
         self.track_export(&view);
         // Until there are pages, and while nothing is being read, the window is the empty one.
@@ -67,6 +68,7 @@ impl ScanCraftUi {
         self.drop_overlay(ui, !workspace);
         if !self.is_modal() {
             sidebar::delete_key(ui, &mut self.state, &view, engine);
+            self.selection_keys(ui, &view);
         }
         // The windows that float above the screens.
         if self.state.settings_open {
@@ -130,6 +132,17 @@ impl ScanCraftUi {
                 canvas::waiting(ui, rect, &self.state.text.t("Reading your photos…"));
             }
         });
+    }
+
+    /// ⌘A selects every page, and Escape lets go of a selection (in Crop, Escape is Done, and the
+    /// selection stays for when the user comes back).
+    fn selection_keys(&mut self, ui: &egui::Ui, view: &ViewState) {
+        let (select_all, escape) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::A), i.key_pressed(egui::Key::Escape)));
+        if select_all && view.tray.len() >= 2 {
+            sidebar::select_all(&mut self.state, view);
+        } else if escape && view.crop.is_none() {
+            sidebar::clear_selection(&mut self.state);
+        }
     }
 
     /// Follows the export through the sheet over the window: while it runs, and once it has been

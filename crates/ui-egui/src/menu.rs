@@ -28,6 +28,7 @@ pub const TOGGLE_INSPECTOR: &str = "view.toggle_inspector";
 pub const ZOOM_IN: &str = "view.zoom_in";
 pub const ZOOM_OUT: &str = "view.zoom_out";
 pub const ZOOM_FIT: &str = "view.zoom_fit";
+pub const SELECT_ALL: &str = "edit.select_all";
 /// The command of the app's own Quit item, which `craft-quit` runs.
 pub const QUIT: &str = craft_quit::QUIT_MENU_ID;
 
@@ -126,6 +127,7 @@ pub fn build_menu_bar(view: &ViewState) -> MenuBar {
                 Node::Item(item(CommandRef::new("edit.undo"), "Undo", "Cmd+Z")),
                 Node::Item(item(CommandRef::new("edit.redo"), "Redo", "Cmd+Shift+Z")),
                 Node::Item(item(page_command("page.delete", page, serde_json::Value::Null), "Delete Page", "⌫")),
+                Node::Item(item(CommandRef::new(SELECT_ALL), "Select All", "Cmd+A")),
             ],
         )
         .role(MenuRole::Edit),
@@ -256,6 +258,7 @@ pub fn item_enabled(id: &str, view: &ViewState) -> bool {
         "edit.redo" => view.can_redo,
         "export.pdf" | EXPORT_OPTIONS | "page.set_look_all" => has_pages,
         "page.delete" | "page.rotate" => sidebar::current_page(view).is_some(),
+        SELECT_ALL => view.tray.len() >= 2,
         "crop.auto" => view.crop.as_ref().is_some_and(|crop| !crop.auto_detect),
         "crop.full_image" | "crop.split" | "crop.set_flatten" | LABEL_REFERENCE => on_crop,
         "page.open_crop" | "page.set_look" => on_enhance,
@@ -299,11 +302,17 @@ pub fn handle_menu_command(command: &CommandRef, state: &mut UiState, view: &Vie
             }
         }
         "export.pdf" => state.start_export(),
+        SELECT_ALL => sidebar::select_all(state, view),
+        // The pages selected together, or the open page: the menu acts on what the buttons do.
         "page.delete" => {
-            if let Some(page) = sidebar::current_page(view)
-                && let Some(number) = view.tray.iter().find(|item| item.page == page).map(|item| item.number)
-            {
-                sidebar::delete_page(state, engine, page, number);
+            let pages = sidebar::targets(state, view);
+            sidebar::delete_pages(state, view, engine, &pages);
+        }
+        "page.rotate" => {
+            let quarter_turns = command.params.get("quarter_turns").and_then(|q| q.as_i64()).and_then(|q| i8::try_from(q).ok());
+            if let Some(quarter_turns) = quarter_turns {
+                let pages = sidebar::targets(state, view);
+                sidebar::rotate_pages(state, engine, &pages, quarter_turns);
             }
         }
         _ => {

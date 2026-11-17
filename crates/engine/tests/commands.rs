@@ -506,6 +506,24 @@ fn a_look_for_the_selected_pages_changes_those_pages_in_one_undo_step() {
 }
 
 #[test]
+fn dragging_the_strength_of_the_selected_pages_is_one_undo_step() {
+    let dir = TempDir::new("strength-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let c = clock.clone();
+    engine.set_clock(move || c.load(Ordering::Relaxed));
+    let strengths = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| p.strength).collect::<Vec<_>>();
+    let before = strengths(&engine);
+    // Sixty events of one drag on the same two pages, 10 ms apart.
+    for value in 0..60u8 {
+        clock.fetch_add(10, Ordering::Relaxed);
+        engine.dispatch(Command::PageSetLookMany { pages: vec![ids[0], ids[2]], look: Look::Grayscale, strength: value }).unwrap();
+    }
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(strengths(&engine), before, "one undo did not take the whole drag back");
+}
+
+#[test]
 fn the_selected_pages_are_turned_together_and_one_undo_turns_them_back() {
     let dir = TempDir::new("rotate-many");
     let (mut engine, ids) = engine_with_four_pages(&dir);
