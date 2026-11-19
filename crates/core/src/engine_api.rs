@@ -75,11 +75,60 @@ pub struct EnhanceView {
     pub more_to_come: bool,
 }
 
+/// Why a page is flagged for a second look: what the interface tells the user before it opens
+/// Crop on that page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewReason {
+    /// Detection found no page edges, so the outline is a guess.
+    NotFound,
+    /// Detection found edges but scored them low.
+    LowScore,
+    /// The outline is not a usable shape (§4.3 "Invalid shape").
+    InvalidOutline,
+    /// The photo looks like a two-page spread.
+    LooksLikeSpread,
+}
+
+/// Where a page is in its life from import to a finished picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageState {
+    /// The photo is still being read, cut, flattened and filtered: the page has no picture yet.
+    Preparing,
+    /// The page is made and nothing about it needs the user.
+    Ready,
+    /// The page is made, but its edges need checking, for the given reason, until the user has
+    /// looked at it (`page.mark_reviewed`) or changed its crop.
+    NeedsLook(ReviewReason),
+    /// The page could not be made. The text says why, in words for the user.
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrayItem {
     pub page: PageId,
+    /// The photo the page was cut from. A photo that holds two pages (a spread) gives two items
+    /// with the same photo, which is how the interface keeps a spread's halves together.
+    pub photo: PhotoId,
     pub number: u32,
     pub text_ready: bool,
+    pub state: PageState,
+}
+
+/// How far a piece of background work has got: `done` of `total` items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub done: u32,
+    pub total: u32,
+}
+
+/// The PDF written by the last export of the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSummary {
+    /// Where the file is.
+    pub path: String,
+    pub pages: u32,
+    /// The file's size in bytes.
+    pub bytes: u64,
 }
 
 /// A message for the user (§4.8).
@@ -103,6 +152,17 @@ pub struct ViewState {
     pub notices: Vec<Notice>,
     /// Set when the last session was never exported (§4.2's restore banner), with its page count.
     pub restore_offer: Option<u32>,
+    /// Photos being read and cut into pages after an import: how many are done of how many were
+    /// added. `None` when no import is running.
+    pub importing: Option<Progress>,
+    /// Pages whose text is being recognised: how many are done of how many are in the document.
+    /// `None` when every page has its text.
+    pub reading_text: Option<Progress>,
+    /// The PDF being written: how many pages are done of how many. `None` when no export is
+    /// running. `export.cancel` stops it.
+    pub exporting: Option<Progress>,
+    /// The PDF the last export wrote, until the next scan starts.
+    pub last_export: Option<ExportSummary>,
 }
 
 /// An image the interface can ask for (§6.5).
@@ -116,6 +176,9 @@ pub enum ImageKey {
     FilterThumb(PageId, Look),
     /// A tray thumbnail, 256 px.
     TrayThumb(PageId),
+    /// The page's cropped, flattened and upright picture with no filter on it, long side 1280 px:
+    /// what "Show Original" compares the filtered page against.
+    OriginalPreview(PageId),
     /// A photo's thumbnail for Screen 2's strip, long side 256 px.
     PhotoThumb(PhotoId),
 }

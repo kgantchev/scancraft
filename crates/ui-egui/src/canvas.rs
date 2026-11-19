@@ -3,9 +3,13 @@
 //!
 //! The corners are stored in the full-resolution photo's pixels, and the canvas shows the display
 //! copy, so every conversion goes through [`Canvas::photo_to_canvas`] and
-//! [`Canvas::canvas_to_photo`].
+//! [`Canvas::canvas_to_photo`]. Zoom and pan are part of the canvas, so those two stay the only
+//! conversions there are.
+//!
+//! A frame handles the pointer first ([`interact_handles`]) and draws after it, so the handle,
+//! the outline and the loupe all show the corner where the hand has just put it.
 
-use egui::{Color32, Mesh, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{Color32, Key, Mesh, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 use scancraft_core::command::{Command, Corner};
 use scancraft_core::engine_api::{CropView, EngineApi, OutlineView};
 use scancraft_core::geom::{Point, Quad, Side};
@@ -13,7 +17,7 @@ use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::SideShape;
 
 use crate::a11y;
-use crate::state::{Selection, UiState};
+use crate::state::{CanvasView, EdgeDrag, Selection, UiState};
 use crate::theme;
 
 /// The padding between the canvas area and the photo (§4.3).
@@ -23,10 +27,17 @@ pub const HANDLE_HIT_RADIUS: f32 = 22.0;
 /// How far outside the photo a corner may be dragged, as a share of the photo's width or height.
 /// It matches the engine's limit, so the canvas always has room for every corner it can hold.
 pub const VIRTUAL_MARGIN: f32 = 0.15;
+/// The smallest zoom: the whole photo in the canvas.
+pub const MIN_ZOOM: f32 = 1.0;
+/// The largest zoom.
+pub const MAX_ZOOM: f32 = 16.0;
 
 /// Where the display copy is drawn, and how a photo pixel maps onto it.
 #[derive(Debug, Clone, Copy)]
 pub struct Canvas {
+    /// Everything the canvas may draw in and be touched in. Zoomed in, the photo is larger than
+    /// this, and what lies outside it is neither drawn nor grabbed.
+    pub area: Rect,
     /// The rectangle the display copy is drawn in, in points.
     pub rect: Rect,
     /// The photo's rectangle with the virtual margin around it: where a corner can be dragged to
@@ -38,26 +49,49 @@ pub struct Canvas {
     pub k: f64,
     /// The full-resolution photo's size.
     pub photo_size: (u32, u32),
+    /// The zoom and pan the canvas was made with, after they were kept within bounds.
+    pub view: CanvasView,
 }
 
 impl Canvas {
-    /// Fits the display copy into `area` with [`PADDING`] points of padding.
+    /// Fits the display copy into `area` with [`PADDING`] points of padding, and room for a
+    /// corner to leave the photo.
     pub fn new(area: Rect, display: &Rgb8, photo_size: (u32, u32)) -> Canvas {
+        Canvas::with_view(area, display, photo_size, CanvasView::default(), VIRTUAL_MARGIN)
+    }
+
+    /// The display copy in `area`, zoomed and panned by `view`, with `margin` of the photo's size
+    /// kept free around it for a corner that has left the photo.
+    ///
+    /// The margin sets the photo's scale, so a caller that changes it while the user is working
+    /// makes the photo jump. The crop screen passes [`VIRTUAL_MARGIN`] every time, whatever the
+    /// corners are doing.
+    pub fn with_view(area: Rect, display: &Rgb8, photo_size: (u32, u32), view: CanvasView, margin: f32) -> Canvas {
+        let margin = if margin.is_finite() { margin.clamp(0.0, VIRTUAL_MARGIN) } else { 0.0 };
         let dw = display.width() as f32;
         let dh = display.height() as f32;
         let inner = area.shrink(PADDING);
+        let zoom = if view.zoom.is_finite() { view.zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { MIN_ZOOM };
         let (mut scale, mut shown) = (0.0, Vec2::ZERO);
         if dw > 0.0 && dh > 0.0 && inner.width() > 0.0 && inner.height() > 0.0 {
-            // The margin is part of the fit, so the photo keeps its size while a corner leaves it.
-            let wide = 1.0 + 2.0 * VIRTUAL_MARGIN;
-            scale = (inner.width() / (dw * wide)).min(inner.height() / (dh * wide));
+            let wide = 1.0 + 2.0 * margin;
+            scale = (inner.width() / (dw * wide)).min(inner.height() / (dh * wide)) * zoom;
             shown = Vec2::new(dw * scale, dh * scale);
         }
-        let rect = Rect::from_min_size(inner.min + (inner.size() - shown) / 2.0, shown);
-        let workspace = rect.expand2(Vec2::new(rect.width() * VIRTUAL_MARGIN, rect.height() * VIRTUAL_MARGIN));
+        // The pan may take the margin's edge to the padded area's edge and no further, so the photo
+        // cannot be lost off the canvas.
+        let workspace_size = shown * (1.0 + 2.0 * margin);
+        let slack = ((workspace_size - inner.size()) / 2.0).max(Vec2::ZERO);
+        let pan = if view.pan.x.is_finite() && view.pan.y.is_finite() {
+            Vec2::new(view.pan.x.clamp(-slack.x, slack.x), view.pan.y.clamp(-slack.y, slack.y))
+        } else {
+            Vec2::ZERO
+        };
+        let rect = Rect::from_center_size(inner.center() + pan, shown);
+        let workspace = rect.expand2(Vec2::new(rect.width() * margin, rect.height() * margin));
         let photo_long = photo_size.0.max(photo_size.1);
         let k = if photo_long > 0 { f64::from(display.width().max(display.height())) / f64::from(photo_long) } else { 1.0 };
-        Canvas { rect, workspace, scale, k, photo_size }
+        Canvas { area, rect, workspace, scale, k, photo_size, view: CanvasView { zoom, pan } }
     }
 
     /// A full-resolution photo position in canvas points.
@@ -74,9 +108,82 @@ impl Canvas {
         Point::new((f64::from(p.x) - f64::from(self.rect.min.x)) / k, (f64::from(p.y) - f64::from(self.rect.min.y)) / k)
     }
 
-    /// Points per full-resolution photo pixel.
+    /// Points per full-resolution photo pixel: the canvas's zoom on the photo.
+    ///
+    /// The display copy is `k` times the photo's size and is drawn at `scale` points a pixel, so
+    /// a photo pixel is `scale × k` points. (It was `scale / k`, which made the loupe show the
+    /// photo smaller than the canvas does.)
     pub fn points_per_photo_px(&self) -> f64 {
-        if self.k <= 0.0 { 0.0 } else { f64::from(self.scale) / self.k }
+        if self.k <= 0.0 { 0.0 } else { f64::from(self.scale) * self.k }
+    }
+}
+
+impl CanvasView {
+    /// This view zoomed by `factor` about the middle of the canvas, which the photo is centred on
+    /// when the pan is zero: what a menu item's zoom does, with no pointer to keep still.
+    pub fn zoomed_about_middle(self, factor: f32) -> CanvasView {
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        CanvasView { zoom, pan: self.pan * (zoom / self.zoom) }
+    }
+
+    /// This view zoomed by `factor`, keeping the point of the photo under `about` where it is.
+    /// `area` is the canvas's area, whose centre the photo is centred on when the pan is zero.
+    pub fn zoomed(self, factor: f32, about: Pos2, area: Rect) -> CanvasView {
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let applied = zoom / self.zoom;
+        let from_centre = about - area.center();
+        CanvasView { zoom, pan: from_centre * (1.0 - applied) + self.pan * applied }
+    }
+}
+
+/// A picture of `size` points fitted into `area` with [`PADDING`] around it, zoomed and panned by
+/// `view`: where it goes, and the view with its pan kept within bounds. The finished page on
+/// Screen 3 is placed with this, as the photo is on Screen 2.
+pub fn fit_view(area: Rect, size: (f32, f32), view: CanvasView) -> (Rect, CanvasView) {
+    let inner = area.shrink(PADDING);
+    let zoom = if view.zoom.is_finite() { view.zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { MIN_ZOOM };
+    if size.0 <= 0.0 || size.1 <= 0.0 || inner.width() <= 0.0 || inner.height() <= 0.0 {
+        return (Rect::from_center_size(area.center(), Vec2::ZERO), CanvasView { zoom, pan: Vec2::ZERO });
+    }
+    let scale = (inner.width() / size.0).min(inner.height() / size.1) * zoom;
+    let shown = Vec2::new(size.0 * scale, size.1 * scale);
+    let slack = ((shown - inner.size()) / 2.0).max(Vec2::ZERO);
+    let pan = if view.pan.x.is_finite() && view.pan.y.is_finite() {
+        Vec2::new(view.pan.x.clamp(-slack.x, slack.x), view.pan.y.clamp(-slack.y, slack.y))
+    } else {
+        Vec2::ZERO
+    };
+    (Rect::from_center_size(inner.center() + pan, shown), CanvasView { zoom, pan })
+}
+
+/// Zoom and pan from the pointer: a pinch or ⌘-scroll zooms about the pointer, a scroll or a drag
+/// on the empty canvas pans, and ⌘0 fits the whole photo again.
+///
+/// `background` is the response of the canvas area's own widget, made before the handles so that
+/// a drag that starts on a handle is the handle's.
+pub fn navigate(ui: &Ui, area: Rect, background: &Response, view: &mut CanvasView) {
+    let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| area.contains(*p));
+    if let Some(pointer) = hover {
+        let zoom = ui.input(|i| i.zoom_delta());
+        if (zoom - 1.0).abs() > f32::EPSILON {
+            *view = view.zoomed(zoom, pointer, area);
+        }
+        let scroll = ui.input(|i| i.smooth_scroll_delta);
+        if scroll != Vec2::ZERO && view.zoom > MIN_ZOOM {
+            view.pan += scroll;
+        }
+    }
+    if background.dragged() && view.zoom > MIN_ZOOM {
+        view.pan += background.drag_delta();
+    }
+    if ui.input(|i| i.modifiers.command && i.key_pressed(Key::Num0)) {
+        *view = CanvasView::default();
     }
 }
 
@@ -378,16 +485,29 @@ fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
     !(has_negative && has_positive)
 }
 
+/// Says that a canvas is waiting for its picture: a spinner and a line of text in the middle of
+/// `rect`, so a canvas is never blank without saying why.
+pub fn waiting(ui: &mut Ui, rect: Rect, label: &str) {
+    let spinner = Rect::from_center_size(rect.center() - Vec2::new(0.0, 14.0), Vec2::splat(28.0));
+    theme::spinner(ui, spinner, Color32::from_white_alpha(200));
+    let line = Rect::from_center_size(rect.center() + Vec2::new(0.0, 24.0), Vec2::new(rect.width().min(360.0), 22.0));
+    ui.put(line, egui::Label::new(egui::RichText::new(label).color(Color32::from_white_alpha(200))).halign(egui::Align::Center));
+}
+
 /// Draws the canvas: the background, the display copy, the scrim outside the outline and the
 /// outline itself.
 pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) {
-    theme::canvas_background(ui, canvas.workspace.expand(PADDING));
-    draw_virtual_area(ui, canvas, crop);
+    // Edge to edge: the dark fills the whole canvas, not a box inside it.
+    theme::canvas_background(ui, canvas.area);
+    // The room around the photo is shown while it is in use: a corner is out in it, or a handle is
+    // held and may be taken there. It is there, and the photo does not move, either way.
+    let room_in_use = crate::crop::a_corner_is_off_the_photo(crop) || state.pressed_handle.is_some();
+    draw_virtual_area(ui, canvas, crop, room_in_use);
     let Some(texture) = state.texture(ui, engine, scancraft_core::engine_api::ImageKey::DisplayCopy(crop.photo), egui::TextureOptions::LINEAR) else {
         return;
     };
     let id = texture.id();
-    let painter = ui.painter_at(canvas.rect);
+    let painter = ui.painter_at(canvas.rect.intersect(canvas.area));
     // The photo, then the scrim over it, then the photo again inside the outline: the page stays
     // at full brightness and everything outside it is dimmed (§4.3).
     painter.image(id, canvas.rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
@@ -399,10 +519,13 @@ pub fn draw_canvas(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiStat
 
 /// Draws the room around the photo, where a corner can be put when the page's real corner is out
 /// of the camera's view: a lighter field, the photo's own edge, and the part of the page outline
-/// that lies out there, tinted, so the "virtual" page reads as a continuation of the photo.
-fn draw_virtual_area(ui: &Ui, canvas: &Canvas, crop: &CropView) {
-    let painter = ui.painter_at(canvas.workspace);
-    painter.rect_filled(canvas.workspace, 0.0, Color32::from_white_alpha(10));
+/// that lies out there, tinted, so the "virtual" page reads as a continuation of the photo. The
+/// lighter field is drawn only while the room is `in_use`; the photo's edge always is.
+fn draw_virtual_area(ui: &Ui, canvas: &Canvas, crop: &CropView, in_use: bool) {
+    let painter = ui.painter_at(canvas.workspace.intersect(canvas.area));
+    if in_use {
+        painter.rect_filled(canvas.workspace, 0.0, Color32::from_white_alpha(10));
+    }
     // Dashed edges mark where the camera's view ends.
     let edge = Stroke::new(1.0, Color32::from_white_alpha(90));
     let corners = [canvas.rect.left_top(), canvas.rect.right_top(), canvas.rect.right_bottom(), canvas.rect.left_bottom(), canvas.rect.left_top()];
@@ -448,7 +571,8 @@ fn draw_photo_inside(painter: &Painter, canvas: &Canvas, outline: &OutlineView, 
     painter.add(Shape::mesh(mesh));
 }
 
-/// Draws the page outline: a 2 pt Scan Cyan line over a 1 pt black halo at 50 % (§4.3).
+/// Draws the page outline: a 2 pt Scan Cyan line over a 4 pt black halo at 50 %, so a dark edge
+/// shows on both sides of the line (§4.3).
 pub fn draw_outline(painter: &Painter, canvas: &Canvas, outline: &OutlineView) {
     let colour = if outline.invalid.is_some() { theme::INVALID } else { theme::SCAN_CYAN };
     let points = outline_path(outline);
@@ -456,8 +580,19 @@ pub fn draw_outline(painter: &Painter, canvas: &Canvas, outline: &OutlineView) {
         return;
     }
     let canvas_points: Vec<Pos2> = points.iter().map(|p| canvas.photo_to_canvas(*p)).collect();
-    painter.add(Shape::line(canvas_points.clone(), Stroke::new(theme::HALO_WIDTH, theme::HALO)));
-    painter.add(Shape::line(canvas_points, Stroke::new(theme::OUTLINE_WIDTH, colour)));
+    painter.add(Shape::line(canvas_points.clone(), theme::halo_stroke(painter.ctx())));
+    painter.add(Shape::line(canvas_points, theme::outline_stroke(painter.ctx(), colour)));
+    // When the page will be flattened, the curved outline it will be cut along is drawn too, thin
+    // and dashed, so Flatten shows what it does before the page is finished.
+    if let Some(fitted) = outline.fitted.as_ref().filter(|line| line.len() >= 3 && outline.invalid.is_none()) {
+        let mut curve: Vec<Pos2> = fitted.iter().map(|p| canvas.photo_to_canvas(*p)).collect();
+        if let Some(first) = curve.first().copied() {
+            curve.push(first);
+        }
+        for shape in Shape::dashed_line(&curve, Stroke::new(1.5, theme::SCAN_CYAN), 5.0, 4.0) {
+            painter.add(shape);
+        }
+    }
 }
 
 /// The outline's path in photo pixels: the four sides, walked clockwise from the top-left corner
@@ -478,138 +613,316 @@ pub fn outline_path(outline: &OutlineView) -> Vec<Point> {
     points
 }
 
-/// Draws the handles of one outline: the four corners, and the one vertex of a side the user bent.
-pub fn draw_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, state: &mut UiState, engine: &mut dyn EngineApi) {
-    let now = ui.input(|i| i.time);
-    for (index, corner) in [Corner::TopLeft, Corner::TopRight, Corner::BottomRight, Corner::BottomLeft].into_iter().enumerate() {
-        let point = quad_point(&outline.corners, index);
-        let position = canvas.photo_to_canvas(point);
-        draw_corner(ui, canvas, outline.page, corner, point, position, state, engine, now);
+/// The four corners, in the order of a quadrilateral's points.
+const CORNERS: [Corner; 4] = [Corner::TopLeft, Corner::TopRight, Corner::BottomRight, Corner::BottomLeft];
+
+/// The hit area of a handle at `position`, in the part of it that lies inside the canvas. A
+/// handle that has scrolled out of the canvas has none, so it cannot take a press that belongs to
+/// whatever lies there.
+fn grip(ui: &Ui, canvas: &Canvas, id: egui::Id, position: Pos2) -> Option<Response> {
+    let hit = Rect::from_center_size(position, Vec2::splat(HANDLE_HIT_RADIUS * 2.0)).intersect(canvas.area);
+    if hit.width() <= 0.0 || hit.height() <= 0.0 {
+        return None;
     }
-    for side in Side::ALL {
-        if side_is_curved(outline, side) {
-            draw_bend_handles(ui, canvas, outline, side, state, engine, now);
-        } else {
-            side_double_click(ui, canvas, outline, side, state, engine);
-        }
+    Some(ui.interact(hit, id, Sense::click_and_drag()))
+}
+
+/// What a press on a handle does to the loupe and the cursor: the loupe opens on the handle while
+/// the button is down, and the mouse cursor goes, so it does not hide what the loupe shows.
+fn track_press(ui: &Ui, state: &mut UiState, response: &Response, id: egui::Id, focus: Point) {
+    if response.is_pointer_button_down_on() {
+        state.pressed_handle = Some(id);
+        state.hold_loupe(focus);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
 }
 
-/// Draws one corner node: a 16 pt white circle with a 2 pt cyan ring (§4.3).
-#[allow(clippy::too_many_arguments)]
-fn draw_corner(
+/// Where a dragged handle's centre should go: where the pointer is, plus how far off the handle's
+/// centre the press began. The handle moves with the pointer instead of jumping to it, so a grab
+/// off the middle of a 44 pt hit area does not move the corner by up to 22 pt.
+fn drag_target(ui: &Ui, state: &mut UiState, response: &Response, position: Pos2) -> Option<Pos2> {
+    if response.drag_started() {
+        let press = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos()).unwrap_or(position);
+        state.grab = position - press;
+    }
+    if response.dragged() {
+        let pointer = response.interact_pointer_pos()?;
+        return Some(pointer + state.grab);
+    }
+    None
+}
+
+/// Handles the pointer on every handle of the crop screen, before anything is drawn. Returns
+/// whether a command went to the engine, so the caller reads the view again.
+pub fn interact_handles(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) -> bool {
+    state.pressed_handle = None;
+    let mut changed = false;
+    for outline in &crop.outlines {
+        // The sides first, so a corner that overlaps one is on top of it.
+        for side in Side::ALL {
+            changed |= if side_is_curved(outline, side) {
+                bend_handle(ui, canvas, outline, side, state, engine)
+            } else {
+                side_handle(ui, canvas, outline, side, state, engine)
+            };
+        }
+        for (index, corner) in CORNERS.into_iter().enumerate() {
+            changed |= corner_handle(ui, canvas, outline, index, corner, state, engine);
+        }
+    }
+    changed |= spine_handles(ui, canvas, crop, state, engine);
+    changed
+}
+
+/// One corner: a press opens the loupe, a drag moves the corner (§4.3).
+fn corner_handle(
     ui: &Ui,
     canvas: &Canvas,
-    page: scancraft_core::recipe::PageId,
+    outline: &OutlineView,
+    index: usize,
     corner: Corner,
-    point: Point,
-    position: Pos2,
     state: &mut UiState,
     engine: &mut dyn EngineApi,
-    now: f64,
-) {
-    let painter = ui.painter_at(canvas.workspace);
-    painter.circle_filled(position, theme::CORNER_RADIUS, theme::HANDLE);
-    painter.circle_stroke(position, theme::CORNER_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
+) -> bool {
+    let page = outline.page;
+    let point = quad_point(&outline.corners, index);
+    let position = canvas.photo_to_canvas(point);
     let id = ui.make_persistent_id(("scancraft.corner", page, corner.index()));
-    let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-    let response = ui.interact(hit, id, Sense::click_and_drag());
-    let mut dragging = false;
-    // A drag that has begun on the node stays with it, however far the pointer jumps in a frame.
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let photo_point = canvas.canvas_to_photo(pointer);
-        dispatch(state, engine, Command::CropSetCorner { page, corner, x: photo_point.x, y: photo_point.y });
-        dragging = true;
+    let Some(response) = grip(ui, canvas, id, position) else { return false };
+    track_press(ui, state, &response, id, point);
+    if response.clicked() || response.drag_started() {
         state.selection = Some(Selection::Corner { page, corner });
-        state.show_loupe(now, pointer);
     }
-    if response.hovered() || dragging {
-        state.selection = Some(Selection::Corner { page, corner });
+    let mut changed = false;
+    // A drag that has begun on the node stays with it, however far the pointer jumps in a frame.
+    if let Some(target) = drag_target(ui, state, &response, position) {
+        let moved = canvas.canvas_to_photo(target);
+        dispatch(state, engine, Command::CropSetCorner { page, corner, x: moved.x, y: moved.y });
+        state.hold_loupe(moved);
+        changed = true;
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::corner_label(corner, point)));
+    changed
 }
 
-/// A double-click near the middle of a straight side gives it its one vertex, which then bends it
-/// (§4.3). Nothing is drawn: the outline is the four corners until the user asks for more.
-fn side_double_click(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi) {
+/// The distance of `p` from `origin` along the unit vector `normal`, in photo pixels.
+fn along(p: Point, origin: Point, normal: Point) -> f64 {
+    (p.x - origin.x) * normal.x + (p.y - origin.y) * normal.y
+}
+
+/// One straight side: a pill at its middle. A drag moves the side along its outward normal
+/// (§4.3), and a double-click gives it its one vertex, which then bends it.
+fn side_handle(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi) -> bool {
+    let page = outline.page;
     let middle = side_middle(&outline.corners, side);
     let position = canvas.photo_to_canvas(middle);
-    let id = ui.make_persistent_id(("scancraft.edge", outline.page, side.index()));
-    let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-    let response = ui.interact(hit, id, Sense::click());
+    let id = ui.make_persistent_id(("scancraft.edge", page, side.index()));
+    let Some(response) = grip(ui, canvas, id, position) else { return false };
+    track_press(ui, state, &response, id, middle);
+    let mut changed = false;
     if response.double_clicked() {
         let handles = bend_through(outline, side, middle);
-        dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles });
+        dispatch(state, engine, Command::CropBendSide { page, side, handles });
+        changed = true;
+    } else {
+        if response.drag_started()
+            && let Some(normal) = outward_normal(&outline.corners, side)
+        {
+            let press = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos()).unwrap_or(position);
+            let last = along(canvas.canvas_to_photo(press), middle, normal);
+            state.edge_drag = Some(EdgeDrag { page, side, middle, normal, last });
+        }
+        if response.dragged()
+            && let Some(drag) = state.edge_drag.filter(|d| d.page == page && d.side == side)
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let reached = along(canvas.canvas_to_photo(pointer), drag.middle, drag.normal);
+            let offset = reached - drag.last;
+            if offset != 0.0 && offset.is_finite() {
+                dispatch(state, engine, Command::CropMoveSide { page, side, offset });
+                state.edge_drag = Some(EdgeDrag { last: reached, ..drag });
+                state.hold_loupe(Point::new(middle.x + drag.normal.x * offset, middle.y + drag.normal.y * offset));
+                changed = true;
+            }
+        }
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} side: double-click to bend", a11y::side_name(side))));
+    if response.drag_stopped() {
+        state.edge_drag = None;
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Slider, true, format!("{} side handle: drag to move, double-click to bend", a11y::side_name(side)))
+    });
+    changed
 }
 
-/// Draws the one vertex of a bent side: a 10 pt white dot with a 2 pt cyan ring at the middle of
-/// its curve (§4.3).
-fn draw_bend_handles(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi, now: f64) {
+/// The one vertex of a bent side: a press opens the loupe, a drag bends the side (§4.3).
+fn bend_handle(ui: &Ui, canvas: &Canvas, outline: &OutlineView, side: Side, state: &mut UiState, engine: &mut dyn EngineApi) -> bool {
+    let page = outline.page;
     let handles = bend_handles(outline, side);
-    let Some(handle) = handles.get(BEND_VERTEX) else { return };
-    let painter = ui.painter_at(canvas.workspace);
-    let position = canvas.photo_to_canvas(*handle);
-    painter.circle_filled(position, theme::BEND_RADIUS, theme::HANDLE);
-    painter.circle_stroke(position, theme::BEND_RADIUS + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING, theme::SCAN_CYAN));
-    let id = ui.make_persistent_id(("scancraft.bend", outline.page, side.index(), BEND_VERTEX));
-    let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-    let response = ui.interact(hit, id, Sense::click_and_drag());
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let moved = bend_through(outline, side, canvas.canvas_to_photo(pointer));
-        dispatch(state, engine, Command::CropBendSide { page: outline.page, side, handles: moved });
-        state.selection = Some(Selection::Bend { page: outline.page, side, index: BEND_VERTEX });
-        state.show_loupe(now, pointer);
+    let Some(handle) = handles.get(BEND_VERTEX).copied() else { return false };
+    let position = canvas.photo_to_canvas(handle);
+    let id = ui.make_persistent_id(("scancraft.bend", page, side.index(), BEND_VERTEX));
+    let Some(response) = grip(ui, canvas, id, position) else { return false };
+    track_press(ui, state, &response, id, handle);
+    if response.clicked() || response.drag_started() {
+        state.selection = Some(Selection::Bend { page, side, index: BEND_VERTEX });
+    }
+    let mut changed = false;
+    if let Some(target) = drag_target(ui, state, &response, position) {
+        let vertex = canvas.canvas_to_photo(target);
+        dispatch(state, engine, Command::CropBendSide { page, side, handles: bend_through(outline, side, vertex) });
+        state.hold_loupe(vertex);
+        changed = true;
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::bend_label(side, BEND_VERTEX)));
-    let page = outline.page;
     response.context_menu(|ui| {
-        if ui.button("Straighten Side").clicked() {
+        if ui.button(state.text.t("Straighten Side")).clicked() {
             dispatch(state, engine, Command::CropStraightenSide { page, side });
+            changed = true;
         }
     });
+    changed
 }
 
-/// Sends a command to the engine and shows its error as a message (§4.8).
-pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Command) {
-    if let Err(error) = engine.dispatch(command) {
-        state.notice(error, true);
+/// The two ends of the spine of a split spread: a press opens the loupe, a drag moves the end
+/// (§4.3).
+fn spine_handles(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) -> bool {
+    let Some(spine) = crop.spine else { return false };
+    let mut changed = false;
+    for (index, point) in spine.iter().enumerate() {
+        let position = canvas.photo_to_canvas(*point);
+        let id = ui.make_persistent_id(("scancraft.spine", crop.photo, index));
+        let Some(response) = grip(ui, canvas, id, position) else { continue };
+        track_press(ui, state, &response, id, *point);
+        if response.clicked() || response.drag_started() {
+            state.selection = Some(Selection::Spine { photo: crop.photo, end: index });
+        }
+        if let Some(target) = drag_target(ui, state, &response, position) {
+            let moved = canvas.canvas_to_photo(target);
+            let (top, bottom) = if index == 0 { (moved, spine[1]) } else { (spine[0], moved) };
+            dispatch(state, engine, Command::CropSetSpine { photo: crop.photo, top, bottom });
+            state.hold_loupe(moved);
+            changed = true;
+        }
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::spine_label(index)));
     }
+    changed
+}
+
+/// Sends a command to the engine and shows its error as a message (§4.8). Returns whether the
+/// engine accepted it.
+pub fn dispatch(state: &mut UiState, engine: &mut dyn EngineApi, command: Command) -> bool {
+    match engine.dispatch(command) {
+        Ok(()) => true,
+        Err(error) => {
+            state.notice(error, true);
+            false
+        }
+    }
+}
+
+/// Draws a ring around a handle the keyboard has selected, so it can be told from the rest.
+fn selection_ring(painter: &Painter, position: Pos2, radius: f32) {
+    painter.circle_stroke(position, radius + 7.0, Stroke::new(4.0 + theme::extra_width(painter.ctx()), theme::halo_stroke(painter.ctx()).color));
+    painter.circle_stroke(position, radius + 7.0, Stroke::new(1.5, theme::HANDLE));
+}
+
+/// Draws a round handle: a white dot in a cyan ring over a dark halo. While it is held it is a
+/// ring only, so the corner it marks shows through (§4.3).
+fn round_handle(painter: &Painter, position: Pos2, radius: f32, held: bool) {
+    let extra = theme::extra_width(painter.ctx());
+    painter.circle_stroke(
+        position,
+        radius + theme::CORNER_RING / 2.0,
+        Stroke::new(theme::CORNER_RING + 2.0 + extra, theme::halo_stroke(painter.ctx()).color),
+    );
+    if !held {
+        painter.circle_filled(position, radius, theme::HANDLE);
+    }
+    painter.circle_stroke(position, radius + theme::CORNER_RING / 2.0, Stroke::new(theme::CORNER_RING + extra, theme::SCAN_CYAN));
+    if held {
+        painter.circle_stroke(position, radius - 1.0, Stroke::new(1.5, theme::HANDLE));
+    }
+}
+
+/// Draws the pill of a straight side: a capsule along the side, white in a cyan edge.
+fn pill(painter: &Painter, position: Pos2, along: Vec2) {
+    let length = theme::EDGE_HANDLE.y;
+    let width = theme::EDGE_HANDLE.x;
+    let reach = (length - width) / 2.0;
+    let (a, b) = (position - along * reach, position + along * reach);
+    let more = theme::extra_width(painter.ctx());
+    for (extra, colour) in [(5.0 + more, theme::halo_stroke(painter.ctx()).color), (3.0 + more / 2.0, theme::SCAN_CYAN), (0.0, theme::HANDLE)] {
+        let w = width + extra;
+        painter.line_segment([a, b], Stroke::new(w, colour));
+        painter.circle_filled(a, w / 2.0, colour);
+        painter.circle_filled(b, w / 2.0, colour);
+    }
+}
+
+/// Draws the handles of every outline: a pill on each straight side, the one vertex of each bent
+/// side, the four corners, and the spine's ends. The handles are drawn after
+/// [`interact_handles`], from the same view, so they are where the hand has just put them.
+pub fn draw_handles(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &UiState) {
+    let painter = ui.painter_at(canvas.area);
+    let held = |id: egui::Id| state.pressed_handle == Some(id);
+    for outline in &crop.outlines {
+        let page = outline.page;
+        for side in Side::ALL {
+            if side_is_curved(outline, side) {
+                let handles = bend_handles(outline, side);
+                let Some(handle) = handles.get(BEND_VERTEX) else { continue };
+                let position = canvas.photo_to_canvas(*handle);
+                let id = ui.make_persistent_id(("scancraft.bend", page, side.index(), BEND_VERTEX));
+                round_handle(&painter, position, theme::BEND_RADIUS, held(id));
+                if state.selection == Some(Selection::Bend { page, side, index: BEND_VERTEX }) {
+                    selection_ring(&painter, position, theme::BEND_RADIUS);
+                }
+            } else {
+                let (a, b) = side.corners();
+                let direction = canvas.photo_to_canvas(quad_point(&outline.corners, b)) - canvas.photo_to_canvas(quad_point(&outline.corners, a));
+                let along = if direction.length() > f32::EPSILON { direction.normalized() } else { Vec2::X };
+                pill(&painter, canvas.photo_to_canvas(side_middle(&outline.corners, side)), along);
+            }
+        }
+        for (index, corner) in CORNERS.into_iter().enumerate() {
+            let position = canvas.photo_to_canvas(quad_point(&outline.corners, index));
+            let id = ui.make_persistent_id(("scancraft.corner", page, corner.index()));
+            round_handle(&painter, position, theme::CORNER_RADIUS, held(id));
+            if state.selection == Some(Selection::Corner { page, corner }) {
+                selection_ring(&painter, position, theme::CORNER_RADIUS);
+            }
+        }
+    }
+    draw_spine(ui, canvas, crop, state);
 }
 
 /// Draws the spine of a split spread: a dashed Scan Cyan line with a round handle at each end
 /// (§4.3).
-pub fn draw_spine(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &mut UiState, engine: &mut dyn EngineApi) {
+fn draw_spine(ui: &Ui, canvas: &Canvas, crop: &CropView, state: &UiState) {
     let Some(spine) = crop.spine else { return };
-    let now = ui.input(|i| i.time);
-    let painter = ui.painter_at(canvas.workspace);
+    let painter = ui.painter_at(canvas.area);
     let a = canvas.photo_to_canvas(spine[0]);
     let b = canvas.photo_to_canvas(spine[1]);
-    for shape in Shape::dashed_line(&[a, b], Stroke::new(theme::OUTLINE_WIDTH, theme::SCAN_CYAN), 6.0, 4.0) {
+    for shape in Shape::dashed_line(&[a, b], theme::halo_stroke(painter.ctx()), 6.0, 4.0) {
+        painter.add(shape);
+    }
+    for shape in Shape::dashed_line(&[a, b], theme::outline_stroke(painter.ctx(), theme::SCAN_CYAN), 6.0, 4.0) {
         painter.add(shape);
     }
     for (index, point) in spine.iter().enumerate() {
         let position = canvas.photo_to_canvas(*point);
-        painter.circle_filled(position, theme::SPINE_RADIUS, theme::SCAN_CYAN);
-        painter.circle_stroke(position, theme::SPINE_RADIUS + 1.0, Stroke::new(2.0, theme::HANDLE));
         let id = ui.make_persistent_id(("scancraft.spine", crop.photo, index));
-        let hit = Rect::from_center_size(position, Vec2::splat(theme::CORNER_HIT_RADIUS * 2.0));
-        let response = ui.interact(hit, id, Sense::click_and_drag());
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let moved = canvas.canvas_to_photo(pointer);
-            let (top, bottom) = if index == 0 { (moved, spine[1]) } else { (spine[0], moved) };
-            dispatch(state, engine, Command::CropSetSpine { photo: crop.photo, top, bottom });
-            state.selection = Some(Selection::Spine { photo: crop.photo, end: index });
-            state.show_loupe(now, pointer);
+        let held = state.pressed_handle == Some(id);
+        if !held {
+            painter.circle_filled(position, theme::SPINE_RADIUS, theme::SCAN_CYAN);
         }
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, a11y::spine_label(index)));
+        painter.circle_stroke(position, theme::SPINE_RADIUS + 1.0, Stroke::new(2.0, theme::HANDLE));
+        if state.selection == (Some(Selection::Spine { photo: crop.photo, end: index })) {
+            selection_ring(&painter, position, theme::SPINE_RADIUS);
+        }
     }
 }
 

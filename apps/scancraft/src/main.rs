@@ -14,6 +14,10 @@ use scancraft_ui_egui::{ScanCraftUi, Settings, UiAction};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+mod accessibility;
+mod quit;
+mod window;
+
 /// What the app does when a panel answers.
 #[derive(Debug, Clone)]
 enum PanelAction {
@@ -23,6 +27,10 @@ enum PanelAction {
     Export { options: ExportOptions },
     /// The folder panel answered with the folder of the reference set the labels go to.
     LabelFolder,
+    /// The folder panel answered with the folder the scans are kept in.
+    ScansFolder,
+    /// The alert about quitting during an export was answered.
+    QuitDuringExport,
 }
 
 struct App {
@@ -30,21 +38,26 @@ struct App {
     engine: Engine,
     menu: Option<craft_menu::NativeMenu>,
     panels: Dialogs<PanelAction>,
-    /// The "Cancel Export or Keep Exporting" question is showing (§4.8).
+    /// The alert "Cancel Export or Keep Exporting" has to be asked (§4.8).
     quit_prompt: bool,
+    /// The alert is on screen, so it is not asked a second time.
+    quit_asked: bool,
     /// The user chose to quit although an export is running.
     quit_confirmed: bool,
+    /// Where the window is and how big, for the next launch.
+    window: window::Memory,
+    /// Reads Reduce Motion and Increase Contrast from the system (§4.9).
+    accessibility: accessibility::Refresh,
 }
 
 impl App {
     /// The state of a menu item for this frame.
-    fn item_state(command: &craft_menu::CommandRef, view: &ViewState) -> craft_menu::ItemState {
-        let mut state = craft_menu::ItemState { enabled: true, checked: None };
+    fn item_state(command: &craft_menu::CommandRef, view: &ViewState, ui: &ScanCraftUi) -> craft_menu::ItemState {
+        // An item is live only when it can act on what the window shows.
+        let mut state = craft_menu::ItemState { enabled: scancraft_ui_egui::menu::item_enabled(command.id.as_str(), view), checked: None };
+        // The two switches of the View menu are on while their panel shows.
+        state.checked = ui.menu_item_checked(command.id.as_str());
         match command.id.as_str() {
-            "edit.undo" => state.enabled = view.can_undo,
-            "edit.redo" => state.enabled = view.can_redo,
-            "crop.auto" => state.checked = view.crop.as_ref().map(|crop| crop.auto_detect),
-            "crop.book" => state.checked = Some(view.book_spreads),
             "crop.set_flatten" => {
                 let mode = command.params.get("mode").and_then(|m| m.as_str()).unwrap_or("Auto");
                 let current = view.crop.as_ref().and_then(|crop| crop.outlines.first().map(|o| o.flatten));
@@ -101,8 +114,22 @@ impl App {
                     let dialog = FileDialog::folder().title("Choose the reference set's folder");
                     self.panels.ask(dialog, PanelAction::LabelFolder);
                 }
+                UiAction::ChooseScansFolder => {
+                    let dialog = FileDialog::folder().title("Choose where scans are kept");
+                    self.panels.ask(dialog, PanelAction::ScansFolder);
+                }
                 UiAction::OpenSettings | UiAction::ShowAbout => {
                     // The interface opens its own windows.
+                }
+                UiAction::RevealInFinder { path } => {
+                    if let Err(e) = reveal_in_finder(&path) {
+                        self.ui.notice(e, true);
+                    }
+                }
+                UiAction::OpenFile { path } => {
+                    if let Err(e) = open_file(&path) {
+                        self.ui.notice(e, true);
+                    }
                 }
                 UiAction::SettingsChanged(settings) => {
                     let engine = &mut self.engine;
@@ -139,6 +166,24 @@ impl App {
                         self.ui.set_label_folder(folder.to_string_lossy().into_owned());
                     }
                 }
+                (PanelAction::ScansFolder, Answer::Paths(paths)) => {
+                    // The next new scan is made there, and the settings file remembers it.
+                    if let Some(folder) = paths.first() {
+                        let chosen = folder.to_string_lossy().into_owned();
+                        self.engine.set_settings(|current| current.sessions_dir = Some(chosen));
+                    }
+                }
+                (PanelAction::QuitDuringExport, answer) => {
+                    self.quit_asked = false;
+                    if let Answer::Unavailable(why) = &answer {
+                        self.ui.notice(format!("The question about quitting could not be asked: {why}"), true);
+                    }
+                    if quit::decide(&answer) == quit::Decision::Quit {
+                        self.quit_confirmed = true;
+                        let _ = self.engine.dispatch(Command::ExportCancel);
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
                 _ => {}
             }
         }
@@ -148,32 +193,17 @@ impl App {
 }
 
 impl App {
-    /// "A PDF is being written. Cancel the export, or keep exporting?" (§4.8).
-    fn quit_question(&mut self, ctx: &egui::Context) {
+    /// "A PDF is still being written": asked once, by the system, while an export is running and
+    /// the user has tried to quit (§4.8).
+    fn ask_about_quitting(&mut self) {
         if !self.quit_prompt {
             return;
         }
-        if !self.engine.is_exporting() {
-            self.quit_prompt = false;
-            return;
+        self.quit_prompt = false;
+        if self.engine.is_exporting() && !self.quit_asked {
+            self.quit_asked = true;
+            self.panels.ask_message(quit::question(), PanelAction::QuitDuringExport);
         }
-        egui::Window::new("Quit during an export").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-            ctx,
-            |ui| {
-                ui.label("A PDF is still being written.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Keep Exporting").clicked() {
-                        self.quit_prompt = false;
-                    }
-                    if ui.button("Cancel Export").clicked() {
-                        self.quit_prompt = false;
-                        self.quit_confirmed = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-            },
-        );
     }
 }
 
@@ -186,14 +216,23 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _ = frame;
+        // Reduce Motion and Increase Contrast, read when the window comes to the front.
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        if let Some(found) = self.accessibility.step(focused, wake, accessibility::read) {
+            self.ui.set_accessibility(found);
+        }
         if scancraft_core::engine_api::EngineApi::poll(&mut self.engine) {
             ctx.request_repaint();
         }
         // The menu bar, rebuilt from the view and laid out for the platform.
         let view = self.engine.view();
         let mut bar = scancraft_ui_egui::build_menu_bar(&view);
-        craft_menu::apply_state(&mut bar, |command| App::item_state(command, &view));
-        let state = scancraft_ui_egui::menu_state(&view);
+        craft_menu::apply_state(&mut bar, |command| App::item_state(command, &view, &self.ui));
+        let state = self.ui.menu_state(&view);
         let options = craft_menu::LayoutOptions::new("ScanCraft");
         let gate = craft_menu::Gate { modal: self.ui.is_modal(), recording_shortcut: false, text_editing: false };
         let clicks = match self.menu.as_mut() {
@@ -217,11 +256,46 @@ impl eframe::App for App {
         craft_quit::on_close_request(ctx);
     }
 
+    fn on_exit(&mut self) {
+        // The window's place is written on the way out, whatever the last moment looked like.
+        self.window.save();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.window.track(ui.ctx());
         self.ui.set_settings(ui_settings(&self.engine));
         self.ui.ui(ui, &mut self.engine);
+        self.ask_about_quitting();
         self.panels(ui, frame);
-        self.quit_question(ui.ctx());
+    }
+}
+
+/// Shows a file in the Finder. The path is passed as an argument, never through a shell, and
+/// only when it is absolute, so it can never be read as one of `open`'s own options.
+fn reveal_in_finder(path: &str) -> Result<(), String> {
+    require_absolute(path)?;
+    run_open(&["-R", path])
+}
+
+/// Opens a file with the program the system has for it.
+fn open_file(path: &str) -> Result<(), String> {
+    require_absolute(path)?;
+    run_open(&[path])
+}
+
+fn require_absolute(path: &str) -> Result<(), String> {
+    if std::path::Path::new(path).is_absolute() { Ok(()) } else { Err("That file's place is not known.".to_owned()) }
+}
+
+/// Runs the system's `open` with `args`; only the Mac has one.
+fn run_open(args: &[&str]) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("This can only be done on a Mac.".to_owned());
+    }
+    match std::process::Command::new("open").args(args).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("The file could not be opened ({status}).")),
+        Err(e) => Err(format!("The file could not be opened: {e}.")),
     }
 }
 
@@ -287,32 +361,57 @@ fn services() -> Services {
     }
 }
 
+/// The native menu bar, installed once, on the main thread, in the creator closure. Only macOS has
+/// one (`craft_menu::mac` is not built elsewhere); on other systems the window has no native menu
+/// and the app is driven by its toolbar and keyboard, so there is nothing to hand back.
+#[cfg(target_os = "macos")]
+fn install_menu(ctx: &egui::Context) -> Option<craft_menu::NativeMenu> {
+    let bar = scancraft_ui_egui::build_menu_bar(&scancraft_ui_egui::fake_engine::empty_view());
+    craft_menu::mac::install(ctx, &bar)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_menu(_ctx: &egui::Context) -> Option<craft_menu::NativeMenu> {
+    None
+}
+
 /// The app icon at 256 px, with a transparent margin outside its rounded corners. It sets the Dock
 /// and window icon when the app runs unbundled; the packaged app takes `assets/ScanCraft.icns`.
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/scancraft-256.png");
 
 fn main() -> ExitCode {
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_min_inner_size([860.0, 600.0]);
+    // The window opens where it was and how big it was.
+    let window = window::Memory::open();
+    let mut viewport = window.viewport();
     match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
         Ok(icon) => viewport = viewport.with_icon(icon),
         // A missing icon is not worth refusing to start for.
         Err(e) => eprintln!("ScanCraft couldn't read its icon: {e}"),
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let root = scancraft_engine::settings::path_from_setting(&scancraft_ui_egui::state::default_session_storage());
+    // The scans folder chosen in Settings, else the default: the first scan of a launch goes there too.
+    let root = scancraft_engine::settings::configured_sessions_dir(craft_settings::Location::Auto);
     let engine = start_engine(&root, services());
     let result = eframe::run_native(
         "ScanCraft",
         options,
         Box::new(move |cc| {
-            // The menu bar is installed once, on the main thread, in the creator closure.
-            let bar = scancraft_ui_egui::build_menu_bar(&scancraft_ui_egui::fake_engine::empty_view());
-            let menu = craft_menu::mac::install(&cc.egui_ctx, &bar);
+            let menu = install_menu(&cc.egui_ctx);
             let wake: craft_dialogs::Wake = {
                 let ctx = cc.egui_ctx.clone();
                 Arc::new(move || ctx.request_repaint())
             };
-            Ok(Box::new(App { ui: ScanCraftUi::new(), engine, menu, panels: Dialogs::new(wake), quit_prompt: false, quit_confirmed: false }))
+            Ok(Box::new(App {
+                ui: ScanCraftUi::new(),
+                engine,
+                menu,
+                panels: Dialogs::new(wake),
+                quit_prompt: false,
+                quit_asked: false,
+                quit_confirmed: false,
+                window,
+                accessibility: accessibility::Refresh::new(),
+            }))
         }),
     );
     match result {

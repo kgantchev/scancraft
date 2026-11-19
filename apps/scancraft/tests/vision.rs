@@ -49,6 +49,9 @@ fn a_photo_goes_from_import_to_pdf_with_vision_services() {
     engine.dispatch(Command::ImportAdd { paths: vec![fixture("flat.png")] }).unwrap();
     settle(&mut engine);
 
+    // The page joined the document by itself, finished; Crop shows the outline that was found.
+    let page = engine.view().tray.first().expect("the page joined the document").page;
+    engine.dispatch(Command::PageOpenCrop { page }).unwrap();
     let view = engine.view();
     let crop = view.crop.expect("Screen 2 opens on the photo");
     let outline = crop.outlines.first().expect("one page outline");
@@ -62,9 +65,7 @@ fn a_photo_goes_from_import_to_pdf_with_vision_services() {
     let Screen::Crop(photo) = engine.view().screen else { panic!("not on Screen 2") };
     engine.dispatch(Command::CropApply { photo }).unwrap();
     settle(&mut engine);
-    let Screen::Enhance(page) = engine.view().screen else { panic!("not on Screen 3") };
-    engine.dispatch(Command::PageAdd { page }).unwrap();
-    settle(&mut engine);
+    let Screen::Enhance(_) = engine.view().screen else { panic!("not on Screen 3") };
     assert_eq!(engine.view().tray.len(), 1);
 
     let out = dir.join("out.pdf");

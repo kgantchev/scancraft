@@ -5,13 +5,13 @@
 //! values of the specification map straight across.
 
 use craft_ui::theme::WidgetPalette;
-use egui::{Color32, Context, CornerRadius, Stroke, Ui, Vec2};
+use egui::{Color32, Context, CornerRadius, Pos2, Rect, Stroke, Ui, Vec2};
 
 /// Copper `#A84128`: the primary buttons.
 pub const COPPER: Color32 = Color32::from_rgb(0xA8, 0x41, 0x28);
 /// Light Copper `#D87840`: the hover and pressed states.
 pub const LIGHT_COPPER: Color32 = Color32::from_rgb(0xD8, 0x78, 0x40);
-/// Scan Cyan `#02FDFE`: the page outline, the handles and the focus ring.
+/// Scan Cyan `#02FDFE`: the page outline and the handles, on the dark canvas.
 pub const SCAN_CYAN: Color32 = Color32::from_rgb(0x02, 0xFD, 0xFE);
 /// The canvas background `#1C1C1E`, the same in both appearances.
 pub const CANVAS_BACKGROUND: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1E);
@@ -28,8 +28,9 @@ pub const HANDLE: Color32 = Color32::WHITE;
 
 /// The width of the page outline's line (§4.3).
 pub const OUTLINE_WIDTH: f32 = 2.0;
-/// The width of the halo under it (§4.3).
-pub const HALO_WIDTH: f32 = 1.0;
+/// The width of the halo under it, wider than the line so the dark edge shows on both sides of it
+/// (§4.3).
+pub const HALO_WIDTH: f32 = 4.0;
 /// The radius of a corner node's white circle (§4.3).
 pub const CORNER_RADIUS: f32 = 8.0;
 /// The width of a corner node's cyan ring (§4.3).
@@ -43,25 +44,56 @@ pub const EDGE_HANDLE: Vec2 = Vec2::new(6.0, 22.0);
 /// The radius of the spine's end handles (§4.3).
 pub const SPINE_RADIUS: f32 = 10.0;
 
-/// Pushes ScanCraft's palette into the context's style: Copper buttons, Light Copper while they
-/// are hovered or pressed, and a Scan Cyan focus ring.
+/// The neutral fill of a control at rest, under the pointer and pressed. Controls are neutral in
+/// both appearances, so the one copper button of a view is the one that moves on.
+fn neutral_fills(dark: bool) -> (Color32, Color32, Color32) {
+    if dark {
+        (Color32::from_rgb(0x3A, 0x3A, 0x3D), Color32::from_rgb(0x48, 0x48, 0x4C), Color32::from_rgb(0x55, 0x55, 0x5A))
+    } else {
+        (Color32::from_rgb(0xE2, 0xE2, 0xE5), Color32::from_rgb(0xD2, 0xD2, 0xD7), Color32::from_rgb(0xC2, 0xC2, 0xC8))
+    }
+}
+
+/// The colour that marks a selection or the keyboard focus on the window's own background: Copper
+/// on the light one, where Scan Cyan can hardly be seen, and Light Copper on the dark one. Scan
+/// Cyan stays on the dark canvas.
+pub fn accent(dark: bool) -> Color32 {
+    if dark { LIGHT_COPPER } else { COPPER }
+}
+
+/// Pushes ScanCraft's palette into the context's style: neutral controls, a copper selection and a
+/// copper focus ring.
 ///
-/// The palette sets every widget state's fill, and the non-interactive state is also the window's
-/// own background, so that one is put back the way egui had it.
+/// Every control rests in a neutral grey, so an unticked checkbox or an unselected radio button
+/// does not look selected, and copper is left to the one primary button of a view
+/// ([`nav_button`]). The palette sets every widget state's fill, and the non-interactive state is
+/// also the window's own background, so that one is put back the way egui had it, and so is every
+/// state's text colour.
 pub fn apply(ctx: &Context) {
-    let dark = ctx.theme() == egui::Theme::Dark;
-    let panel = if dark { Color32::from_rgb(0x25, 0x25, 0x27) } else { Color32::from_rgb(0xF2, 0xF2, 0xF2) };
-    let palette = WidgetPalette { noninteractive: panel, inactive: COPPER, hovered: LIGHT_COPPER, active: LIGHT_COPPER, open: COPPER };
     let theme = ctx.theme();
+    let dark = theme == egui::Theme::Dark;
+    let panel = if dark { Color32::from_rgb(0x25, 0x25, 0x27) } else { Color32::from_rgb(0xF2, 0xF2, 0xF2) };
+    let (rest, hover, pressed) = neutral_fills(dark);
+    let palette = WidgetPalette { noninteractive: panel, inactive: rest, hovered: hover, active: pressed, open: rest };
+    let defaults = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let accent = accent(dark);
     ctx.style_mut_of(theme, |style| {
         let window = style.visuals.widgets.noninteractive;
         palette.apply_to(&mut style.visuals.widgets, CornerRadius::same(6), Stroke::new(1.0, Color32::WHITE));
         style.visuals.widgets.noninteractive = window;
-        style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, SCAN_CYAN);
-        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, LIGHT_COPPER);
-        style.visuals.selection.stroke = Stroke::new(2.0, SCAN_CYAN);
-        style.visuals.selection.bg_fill = SCAN_CYAN.gamma_multiply(0.25);
-        style.visuals.hyperlink_color = SCAN_CYAN;
+        let widgets = &mut style.visuals.widgets;
+        widgets.inactive.fg_stroke = defaults.widgets.inactive.fg_stroke;
+        widgets.hovered.fg_stroke = defaults.widgets.hovered.fg_stroke;
+        widgets.active.fg_stroke = defaults.widgets.active.fg_stroke;
+        widgets.open.fg_stroke = defaults.widgets.open.fg_stroke;
+        widgets.inactive.bg_stroke = Stroke::NONE;
+        // The pressed and the focused state: the ring the keyboard's focus shows.
+        widgets.active.bg_stroke = Stroke::new(2.0, accent);
+        widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.6));
+        // A selection is a tint of copper with copper ink: legible on both backgrounds.
+        style.visuals.selection.stroke = Stroke::new(1.5, accent);
+        style.visuals.selection.bg_fill = accent.gamma_multiply(if dark { 0.3 } else { 0.18 });
+        style.visuals.hyperlink_color = accent;
     });
 }
 
@@ -70,17 +102,85 @@ pub fn canvas_background(ui: &Ui, rect: egui::Rect) {
     ui.painter().rect_filled(rect, 0.0, CANVAS_BACKGROUND);
 }
 
-/// The style of the icon-only buttons: Copper, with the focus ring in Scan Cyan.
-pub fn icon_button_style() -> craft_ui::buttons::IconButtonStyle {
-    let fill = Stroke::new(1.0, Color32::TRANSPARENT);
+/// The amber of the dot that marks a page whose edges need a look.
+pub const NEEDS_LOOK: Color32 = Color32::from_rgb(0xF2, 0xA1, 0x2E);
+
+/// The style of the toolbar's icon buttons: neutral, in the window's own colours. Copper is for the
+/// one primary button of a view, so an icon button is never copper; the keyboard's focus ring is
+/// the accent colour.
+pub fn icon_button_style(dark: bool) -> craft_ui::buttons::IconButtonStyle {
+    let (rest, hover, pressed) = neutral_fills(dark);
+    let ink = if dark { Color32::from_rgb(0xE6, 0xE6, 0xE8) } else { Color32::from_rgb(0x2A, 0x2A, 0x2E) };
+    let none = Stroke::new(1.0, Color32::TRANSPARENT);
+    let visuals = |fill: Color32| craft_ui::buttons::ButtonVisuals { fill, stroke: none, icon: ink };
     craft_ui::buttons::IconButtonStyle {
-        normal: craft_ui::buttons::ButtonVisuals { fill: COPPER, stroke: fill, icon: Color32::WHITE },
-        hovered: craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE },
-        pressed: Some(craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE }),
-        selected: craft_ui::buttons::ButtonVisuals { fill: LIGHT_COPPER, stroke: fill, icon: Color32::WHITE },
+        normal: visuals(Color32::TRANSPARENT),
+        hovered: visuals(hover),
+        pressed: Some(visuals(pressed)),
+        // A selected button (the mode that is on) is the resting neutral fill, held down.
+        selected: visuals(rest),
         corner_radius: CornerRadius::same(6),
-        focus_stroke: Stroke::new(2.0, SCAN_CYAN),
+        focus_stroke: Stroke::new(2.0, accent(dark)),
     }
+}
+
+/// The primary button of a toolbar: copper, with white text, `height` points tall. It is the one
+/// copper button of the window, so it is used once.
+pub fn primary_button(ui: &mut Ui, label: &str, enabled: bool, height: f32) -> egui::Response {
+    let font = egui::FontId::proportional(14.0);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x + 28.0, height), egui::Sense::click());
+    let hovered = enabled && response.hovered();
+    let alpha = if enabled { 1.0 } else { 0.4 };
+    let fill = if hovered { LIGHT_COPPER } else { COPPER };
+    let painter = ui.painter_at(rect.expand(2.0));
+    painter.rect_filled(rect, 6.0, fill.gamma_multiply(alpha));
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, Color32::WHITE.gamma_multiply(alpha));
+    painter.galley(Pos2::new(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+    if response.has_focus() {
+        painter.rect_stroke(rect.shrink(2.0), 5.0, Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Inside);
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
+}
+
+/// Two buttons side by side, one of them on: a switch between two views. Returns which one the
+/// user clicked, if any. Each is a button of its own for a screen reader, selected or not.
+pub fn segmented(ui: &mut Ui, labels: [&str; 2], on: usize, enabled: [bool; 2]) -> Option<usize> {
+    let dark = ui.visuals().dark_mode;
+    let (rest, hover, _) = neutral_fills(dark);
+    let ink = ui.visuals().text_color();
+    let font = egui::FontId::proportional(14.0);
+    let widths: Vec<f32> = labels.iter().map(|l| ui.painter().layout_no_wrap((*l).to_owned(), font.clone(), ink).size().x + 24.0).collect();
+    let height = 28.0;
+    let total = Vec2::new(widths[0] + widths[1], height);
+    let (outer, _) = ui.allocate_exact_size(total, egui::Sense::hover());
+    ui.painter().rect_filled(outer, 7.0, rest);
+    let mut clicked = None;
+    let mut x = outer.min.x;
+    for (index, label) in labels.iter().enumerate() {
+        let cell = Rect::from_min_size(Pos2::new(x, outer.min.y), Vec2::new(widths[index], height));
+        x += widths[index];
+        let id = ui.make_persistent_id(("scancraft.segment", index));
+        let response = ui.interact(cell, id, egui::Sense::click());
+        let selected = index == on;
+        if selected {
+            let fill = if dark { Color32::from_rgb(0x5E, 0x5E, 0x64) } else { Color32::WHITE };
+            ui.painter().rect_filled(cell.shrink(2.0), 5.0, fill);
+        } else if response.hovered() && enabled[index] {
+            ui.painter().rect_filled(cell.shrink(2.0), 5.0, hover);
+        }
+        let colour = if enabled[index] { ink } else { ink.gamma_multiply(0.4) };
+        ui.painter().text(cell.center(), egui::Align2::CENTER_CENTER, *label, font.clone(), colour);
+        if response.has_focus() {
+            ui.painter().rect_stroke(cell.shrink(2.0), 5.0, Stroke::new(2.0, accent(dark)), egui::StrokeKind::Inside);
+        }
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled[index], selected, *label));
+        if response.clicked() && enabled[index] {
+            clicked = Some(index);
+        }
+    }
+    clicked
 }
 
 /// Which way an arrow points.
@@ -121,7 +221,7 @@ pub fn arrow_button(ui: &mut Ui, label: &str, pointing: Arrow) -> egui::Response
 
 /// The fill of a tool button: neutral, so the copper buttons stay the ones that move on.
 pub fn tool_fill(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode { Color32::from_rgb(0x3A, 0x3A, 0x3D) } else { Color32::from_rgb(0xD9, 0xD9, 0xDC) }
+    neutral_fills(ui.visuals().dark_mode).0
 }
 
 /// A button that changes the picture or the page: neutral and full width, never copper.
@@ -131,6 +231,86 @@ pub fn tool_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     let button =
         egui::Button::new(egui::RichText::new(label).color(ink)).fill(fill).stroke(Stroke::NONE).min_size(Vec2::new(ui.available_width(), 28.0));
     ui.add_enabled(enabled, button)
+}
+
+/// Tells the drawing code what the system's accessibility settings are. They are kept in the
+/// context, so each window of a test has its own.
+pub fn set_accessibility(ctx: &Context, accessibility: crate::state::Accessibility) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::NULL, accessibility));
+}
+
+/// The accessibility settings last given to [`set_accessibility`]; none are on before that.
+pub fn accessibility(ctx: &Context) -> crate::state::Accessibility {
+    ctx.data(|data| data.get_temp(egui::Id::NULL)).unwrap_or_default()
+}
+
+/// The dark line under the outline, handles and the lens's lines: wider and darker with Increase
+/// Contrast, so it shows on paper of any colour.
+pub fn halo_stroke(ctx: &Context) -> Stroke {
+    if accessibility(ctx).increase_contrast { Stroke::new(HALO_WIDTH + 3.0, Color32::from_black_alpha(215)) } else { Stroke::new(HALO_WIDTH, HALO) }
+}
+
+/// The line of the page outline: thicker with Increase Contrast.
+pub fn outline_stroke(ctx: &Context, colour: Color32) -> Stroke {
+    Stroke::new(if accessibility(ctx).increase_contrast { OUTLINE_WIDTH + 1.5 } else { OUTLINE_WIDTH }, colour)
+}
+
+/// How much thicker a ring or a line is drawn with Increase Contrast, in points.
+pub fn extra_width(ctx: &Context) -> f32 {
+    if accessibility(ctx).increase_contrast { 1.5 } else { 0.0 }
+}
+
+/// A spinner: three quarters of a ring that turns, drawn in `rect` in `colour`.
+///
+/// It asks for a frame twenty times a second, not for every frame as egui's own does, so a
+/// waiting screen does not keep the processor busy. With Reduce Motion it does not turn, and asks
+/// for no frames: the ring is the picture of "working" and the words beside it say the rest.
+pub fn spinner(ui: &Ui, rect: egui::Rect, colour: Color32) {
+    let still = accessibility(ui.ctx()).reduce_motion;
+    let time = if still { 0.0 } else { ui.input(|i| i.time) };
+    let radius = (rect.width().min(rect.height()) / 2.0 - 1.5).max(1.0);
+    let start = (time * std::f64::consts::TAU * 0.9) as f32;
+    let points: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let angle = start + std::f32::consts::TAU * 0.75 * i as f32 / 24.0;
+            rect.center() + Vec2::new(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, Stroke::new(2.0, colour)));
+    if !still {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A small drawn icon at the head of a toast: a red disc with an exclamation mark for an error, a
+/// neutral disc with a tick for anything else. The two differ in shape as well as in colour.
+pub fn toast_icon(ui: &mut Ui, error: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let c = rect.center();
+    if error {
+        painter.circle_filled(c, 8.0, INVALID);
+        painter.line_segment([c + Vec2::new(0.0, -4.0), c + Vec2::new(0.0, 1.0)], Stroke::new(2.0, Color32::WHITE));
+        painter.circle_filled(c + Vec2::new(0.0, 4.0), 1.2, Color32::WHITE);
+    } else {
+        painter.circle_filled(c, 8.0, accent(ui.visuals().dark_mode));
+        let stroke = Stroke::new(2.0, Color32::WHITE);
+        painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 3.0)], stroke);
+        painter.line_segment([c + Vec2::new(-1.0, 3.0), c + Vec2::new(4.0, -3.5)], stroke);
+    }
+}
+
+/// A small close button, a drawn cross with `label` as its accessible name.
+pub fn close_button(ui: &mut Ui, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::click());
+    let colour = if response.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, colour);
+    let painter = ui.painter_at(rect);
+    painter.line_segment([c + Vec2::new(-4.0, -4.0), c + Vec2::new(4.0, 4.0)], stroke);
+    painter.line_segment([c + Vec2::new(-4.0, 4.0), c + Vec2::new(4.0, -4.0)], stroke);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The colour of text on the window's own background, in either appearance.

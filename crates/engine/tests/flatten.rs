@@ -64,6 +64,7 @@ fn run_with(scene: &Scene, tag: &str, mode: FlattenMode) -> Page {
     let path = write(&dir, "scene.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo_id, page_id) = current(&engine);
     if mode != FlattenMode::Auto {
         engine.dispatch(Command::CropSetFlatten { page: page_id, mode }).unwrap();
@@ -71,7 +72,7 @@ fn run_with(scene: &Scene, tag: &str, mode: FlattenMode) -> Page {
     engine.dispatch(Command::CropApply { photo: photo_id }).unwrap();
     assert!(matches!(engine.view().screen, Screen::Enhance(_)));
     settle(&mut engine);
-    engine.session().pending().first().cloned().expect("the applied page is waiting for Add Page")
+    engine.session().file().pages.first().cloned().expect("the page is in the document")
 }
 
 fn decision(page: &Page) -> (bool, Option<FlattenReason>) {
@@ -132,10 +133,11 @@ fn a_page_with_no_text_and_straight_sides_gets_no_sheet() {
     let path = write(&dir, "desk.png", &desk_png(0));
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo, _) = current(&engine);
     engine.dispatch(Command::CropApply { photo }).unwrap();
     settle(&mut engine);
-    let page = engine.session().pending().first().cloned().unwrap();
+    let page = engine.session().file().pages.first().cloned().unwrap();
     assert!(page.sheet.is_none(), "{:?}", page.sheet);
 }
 
@@ -151,6 +153,7 @@ fn a25_traces_the_curved_edges_of_a_detected_page() {
     let path = write(&dir, "scene.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let crop = engine.view().crop.expect("Screen 2");
     let traced = crop.outlines[0].sides.iter().filter(|s| matches!(s, scancraft_core::recipe::SideShape::Traced { .. })).count();
     assert!(traced >= 3, "A25 traced {traced} of the four sides");

@@ -1,7 +1,7 @@
-//! Screen 3, Filtering and Export (§4.4): the page canvas, the filter strip, the strength slider
-//! and the notes the engine gives about the page.
+//! The finished page (§4.4): the page canvas, the filters' names, and the notes the engine gives
+//! about the page. The controls that change the page are in the inspector and the toolbar.
 
-use egui::{Color32, Key, Rect, Sense, TextureOptions, Ui, Vec2};
+use egui::{Color32, Key, Rect, Sense, TextureOptions, Ui};
 
 use scancraft_core::command::Command;
 use scancraft_core::engine_api::{EngineApi, ImageKey, ViewState};
@@ -11,14 +11,10 @@ use crate::canvas;
 use crate::state::UiState;
 use crate::theme;
 
-/// The looks of the filter strip, in the order of §4.4.
+/// The filters of the list, in the order of §4.4.
 pub const LOOKS: [Look; 4] = [Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument];
-/// The size of a filter-strip thumbnail (§4.4).
-pub const THUMB_SIZE: Vec2 = Vec2::new(112.0, 150.0);
-/// The room the filter strip and the strength slider take below the page.
-pub const STRIP_HEIGHT: f32 = 210.0;
 
-/// The name of a look (§4.4).
+/// The name of a filter (§4.4).
 pub fn look_name(look: Look) -> &'static str {
     match look {
         Look::Original => "Original",
@@ -28,97 +24,71 @@ pub fn look_name(look: Look) -> &'static str {
     }
 }
 
-/// Draws Screen 3: the page. Its tools are in the tools panel and its buttons in the step bar.
+/// Draws the finished page: the canvas, and the keyboard of the view.
 pub fn enhance_screen(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    if view.enhance.is_none() {
-        return;
-    }
-    let area = ui.available_rect_before_wrap();
-    let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click());
-    page_canvas(ui, state, view, rect, response.is_pointer_button_down_on(), engine);
-    keyboard(ui, state, view, engine);
-}
-
-/// The page canvas: the flattened page, and the Original look while the page is held down
-/// (§4.4).
-fn page_canvas(ui: &mut Ui, state: &mut UiState, view: &ViewState, rect: Rect, pressed: bool, engine: &mut dyn EngineApi) {
     let Some(enhance) = view.enhance.as_ref() else {
         return;
     };
-    let key = if pressed {
-        // The contract has no preview of the Original look, so the 512 px thumbnail is used.
-        ImageKey::FilterThumb(enhance.page, Look::Original)
-    } else {
-        ImageKey::LookPreview(enhance.page)
+    let area = ui.available_rect_before_wrap();
+    let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
+    // The canvas has a name, so the keyboard's focus on it is announced and not silent.
+    let name = state.text.t("Page");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, name.clone()));
+    if state.enhance_canvas_of != Some(enhance.page) {
+        state.enhance_canvas_view = crate::state::CanvasView::default();
+        state.enhance_canvas_of = Some(enhance.page);
+    }
+    let mut zoom_and_pan = state.enhance_canvas_view;
+    canvas::navigate(ui, rect, &response, &mut zoom_and_pan);
+    state.enhance_canvas_view = zoom_and_pan;
+    // Show Original is held by its button, which is drawn before the canvas, or by the \ key.
+    let original = state.show_original || ui.input(|i| i.key_down(Key::Backslash));
+    page_canvas(ui, state, view, rect, original, engine);
+    keyboard(ui, state, view, engine);
+}
+
+/// The page canvas: the flattened page in its filter, or with no filter while Show Original is
+/// held. It zooms and pans like the crop canvas does.
+fn page_canvas(ui: &mut Ui, state: &mut UiState, view: &ViewState, rect: Rect, original: bool, engine: &mut dyn EngineApi) {
+    let Some(enhance) = view.enhance.as_ref() else {
+        return;
     };
-    // While the engine renders the page in a new look, the canvas keeps the picture it had, so a
-    // click on a look changes the page at once and never blanks it.
-    let (texture, image) = match engine.image(key) {
+    let wanted = if original { ImageKey::OriginalPreview(enhance.page) } else { ImageKey::LookPreview(enhance.page) };
+    // While the engine renders the page in a new filter, or the unfiltered page for the first
+    // time, the canvas keeps the picture it had, so a click on a filter changes the page at once
+    // and never blanks it.
+    let (texture, image) = match engine.image(wanted) {
         Some(image) => {
-            let Some(texture) = state.texture_with(ui, key, image.clone(), TextureOptions::LINEAR) else {
+            let Some(texture) = state.texture_with(ui, wanted, image.clone(), TextureOptions::LINEAR) else {
                 return;
             };
             (texture, image)
         }
-        None => match state.textures.get(&key) {
-            Some(previous) => (previous.handle.clone(), previous.image.clone()),
-            None => return,
-        },
+        None => {
+            let fallback = ImageKey::LookPreview(enhance.page);
+            let previous = state.textures.get(&wanted).or_else(|| state.textures.get(&fallback));
+            match previous {
+                Some(previous) => (previous.handle.clone(), previous.image.clone()),
+                None => {
+                    // Nothing to show yet: say so, instead of a blank canvas.
+                    theme::canvas_background(ui, rect);
+                    canvas::waiting(ui, rect, &state.text.t("Preparing the page…"));
+                    return;
+                }
+            }
+        }
     };
     theme::canvas_background(ui, rect);
-    let size = (image.width() as f32, image.height() as f32);
-    let inner = rect.shrink(canvas::PADDING);
-    let scale = if size.0 > 0.0 && size.1 > 0.0 { (inner.width() / size.0).min(inner.height() / size.1) } else { 0.0 };
-    let shown = Vec2::new(size.0 * scale, size.1 * scale);
-    let place = Rect::from_min_size(inner.min + (inner.size() - shown) / 2.0, shown);
+    let (place, applied) = canvas::fit_view(rect, (image.width() as f32, image.height() as f32), state.enhance_canvas_view);
+    state.enhance_canvas_view = applied;
     ui.painter_at(rect).image(texture.id(), place, Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
-}
-
-/// The filter strip: four thumbnails with their names (§4.4).
-pub fn filter_strip(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    let Some(enhance) = view.enhance.as_ref() else {
-        return;
-    };
-    ui.horizontal(|ui| {
-        for (index, look) in LOOKS.iter().enumerate() {
-            let name = state.text.t(look_name(*look));
-            let selected = state.filter_index == index;
-            let response = ui.vertical(|ui| {
-                let (rect, response) = ui.allocate_exact_size(THUMB_SIZE, Sense::click());
-                let texture = state.texture(ui, engine, ImageKey::FilterThumb(enhance.page, *look), TextureOptions::LINEAR);
-                if let Some(texture) = texture {
-                    ui.painter_at(rect).image(texture.id(), rect, Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
-                }
-                if selected {
-                    ui.painter_at(rect).rect_stroke(rect, 4.0, egui::Stroke::new(2.0, theme::SCAN_CYAN), egui::StrokeKind::Middle);
-                }
-                // The look's name is under its thumbnail (§4.4).
-                ui.label(name.clone());
-                response
-            });
-            if response.inner.clicked() {
-                apply_look(state, view, engine, index);
-            }
-            let label_text = format!("{name} filter");
-            response.inner.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label_text.clone()));
-        }
-    });
-}
-
-/// The strength slider, hidden for the Original look (§4.4).
-pub fn strength_slider(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
-    let Some(enhance) = view.enhance.as_ref() else {
-        return;
-    };
-    let Some(_default) = enhance.look.default_strength() else {
-        return;
-    };
-    let mut strength = f32::from(enhance.strength);
-    let label = state.text.t("Strength");
-    let response = ui.add(egui::Slider::new(&mut strength, 0.0..=100.0).text(label));
-    if response.changed() {
-        let value = strength.clamp(0.0, 100.0).round() as u8;
-        canvas::dispatch(state, engine, Command::PageSetStrength { page: enhance.page, value });
+    if original {
+        // Say what is on show, so a held button is never mistaken for the finished page.
+        let label = state.text.t("Original");
+        let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
+        let chip = Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), galley.size() + egui::vec2(16.0, 8.0));
+        ui.painter().rect_filled(chip, 6.0, Color32::from_black_alpha(190));
+        ui.painter().galley(chip.min + egui::vec2(8.0, 4.0), galley, Color32::WHITE);
     }
 }
 
@@ -129,21 +99,25 @@ pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
     };
     if enhance.turned_automatically {
         let text = state.text.t("Turned upright automatically");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(text);
             let undo = state.text.t("Undo");
+            // The one thing this note is about: turn the page back. The general undo would revert
+            // whatever the user did last, which may be something else.
             if ui.button(undo).clicked() {
-                canvas::dispatch(state, engine, Command::EditUndo);
+                let turned = i8::try_from(enhance.quarter_turns % 4).unwrap_or(0);
+                canvas::dispatch(state, engine, Command::PageRotate { page: enhance.page, quarter_turns: -turned });
             }
         });
     }
     if enhance.flattened_automatically {
         let text = state.text.t("Flattened curved page");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(text);
             let undo = state.text.t("Undo");
+            // Leave this page flat: the one thing this note is about.
             if ui.button(undo).clicked() {
-                canvas::dispatch(state, engine, Command::EditUndo);
+                canvas::dispatch(state, engine, Command::CropSetFlatten { page: enhance.page, mode: scancraft_core::recipe::FlattenMode::Off });
             }
         });
     }
@@ -160,23 +134,36 @@ pub fn notes(ui: &mut Ui, state: &mut UiState, view: &ViewState, engine: &mut dy
     }
 }
 
-/// Applies the look of the filter strip's selection (§4.4).
+/// Applies the filter of the list's index (§4.4): to the pages selected together when there are
+/// several, which start at the filter's own strength, else to the open page.
 pub fn apply_look(state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi, index: usize) {
     let Some(enhance) = view.enhance.as_ref() else { return };
     let Some(look) = LOOKS.get(index).copied() else { return };
-    state.filter_index = index;
-    canvas::dispatch(state, engine, Command::PageSetLook { page: enhance.page, look });
+    let pages = crate::sidebar::targets(state, view);
+    if pages.len() >= 2 {
+        let strength = look.default_strength().unwrap_or(0);
+        canvas::dispatch(state, engine, Command::PageSetLookMany { pages, look, strength });
+    } else {
+        canvas::dispatch(state, engine, Command::PageSetLook { page: enhance.page, look });
+    }
 }
 
-/// The keyboard of Screen 3: the arrow keys move the filter strip's selection, and the number keys
-/// pick a look (§4.4).
+/// The keyboard of the finished page: up and down move through the filters, the number keys pick
+/// one, and left and right go to the page before and after.
 fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn EngineApi) {
+    // The strength slider, while it has the keyboard's focus, takes the arrow keys itself. (Any
+    // widget having the focus is not the test: a click on a filter or on the page gives that
+    // widget the focus, and the arrow keys would then stop.)
+    if state.keys_taken {
+        return;
+    }
     let Some(enhance) = view.enhance.as_ref() else { return };
-    let left = ui.input(|i| i.key_pressed(Key::ArrowLeft));
-    let right = ui.input(|i| i.key_pressed(Key::ArrowRight));
-    if left || right {
+    let current = LOOKS.iter().position(|look| *look == enhance.look).unwrap_or(0);
+    let (up, down, left, right) =
+        ui.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowLeft), i.key_pressed(Key::ArrowRight)));
+    if up || down {
         let len = LOOKS.len();
-        let index = if right { (state.filter_index + 1) % len } else { (state.filter_index + len - 1) % len };
+        let index = if down { (current + 1) % len } else { (current + len - 1) % len };
         apply_look(state, view, engine, index);
     }
     for (index, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
@@ -184,8 +171,10 @@ fn keyboard(ui: &Ui, state: &mut UiState, view: &ViewState, engine: &mut dyn Eng
             apply_look(state, view, engine, index);
         }
     }
-    // The strip's selection follows the page's look.
-    if let Some(index) = LOOKS.iter().position(|look| *look == enhance.look) {
-        state.filter_index = index;
+    if left || right {
+        let page = crate::sidebar::neighbour_page(view, right);
+        if let Some(page) = page {
+            canvas::dispatch(state, engine, Command::PageEdit { page });
+        }
     }
 }

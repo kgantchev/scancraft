@@ -61,12 +61,28 @@ pub enum Command {
     PageSetLook { page: PageId, look: Look },
     #[serde(rename = "page.set_strength")]
     PageSetStrength { page: PageId, value: u8 },
+    /// Puts the same look and strength on every page of the document, as one undo step.
+    #[serde(rename = "page.set_look_all")]
+    PageSetLookAll { look: Look, strength: u8 },
+    /// Puts the same look and strength on the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.set_look_many")]
+    PageSetLookMany { pages: Vec<PageId>, look: Look, strength: u8 },
     #[serde(rename = "page.rotate")]
     PageRotate { page: PageId, quarter_turns: i8 },
+    /// Turns the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.rotate_many")]
+    PageRotateMany { pages: Vec<PageId>, quarter_turns: i8 },
     #[serde(rename = "page.add")]
     PageAdd { page: PageId },
+    /// The user has looked at a page flagged `PageState::NeedsLook` and it is right as it is: the
+    /// flag goes.
+    #[serde(rename = "page.mark_reviewed")]
+    PageMarkReviewed { page: PageId },
     #[serde(rename = "page.delete")]
     PageDelete { page: PageId },
+    /// Deletes the pages selected in the sidebar, as one undo step.
+    #[serde(rename = "page.delete_many")]
+    PageDeleteMany { pages: Vec<PageId> },
     #[serde(rename = "page.move")]
     PageMove { from: u32, to: u32 },
     #[serde(rename = "page.edit")]
@@ -81,6 +97,9 @@ pub enum Command {
     ReferenceLabel { page: PageId, folder: String, category: String },
     #[serde(rename = "export.pdf")]
     ExportPdf { path: String, options: ExportOptions },
+    /// Stops the export that is running. The half-written file is removed.
+    #[serde(rename = "export.cancel")]
+    ExportCancel,
     #[serde(rename = "session.new")]
     SessionNew,
     #[serde(rename = "session.restore")]
@@ -109,14 +128,20 @@ impl Command {
         "crop.apply",
         "page.set_look",
         "page.set_strength",
+        "page.set_look_all",
+        "page.set_look_many",
         "page.rotate",
+        "page.rotate_many",
         "page.add",
+        "page.mark_reviewed",
         "page.delete",
+        "page.delete_many",
         "page.move",
         "page.edit",
         "page.open_crop",
         "reference.label",
         "export.pdf",
+        "export.cancel",
         "session.new",
         "session.restore",
         "edit.undo",
@@ -131,8 +156,9 @@ impl Command {
 
 #[cfg(test)]
 mod tests {
-    use super::Command;
-    use crate::recipe::PageId;
+    use super::{Command, Corner};
+    use crate::geom::{Point, Side};
+    use crate::recipe::{Look, PageId};
 
     #[test]
     fn commands_parse_by_id() {
@@ -156,5 +182,83 @@ mod tests {
         assert_eq!(ids.len(), count, "the list of ids has a repeat");
         assert!(Command::IDS.contains(&"page.open_crop"));
         assert!(Command::IDS.contains(&"reference.label"));
+    }
+
+    #[test]
+    fn the_commands_of_the_review_first_flow_parse_and_are_listed() {
+        let all = Command::from_json(r#"{"id":"page.set_look_all","params":{"look":"Grayscale","strength":70}}"#).unwrap();
+        assert_eq!(all, Command::PageSetLookAll { look: Look::Grayscale, strength: 70 });
+        let reviewed = Command::from_json(r#"{"id":"page.mark_reviewed","params":{"page":5}}"#).unwrap();
+        assert_eq!(reviewed, Command::PageMarkReviewed { page: PageId(5) });
+        assert_eq!(Command::from_json(r#"{"id":"export.cancel"}"#).unwrap(), Command::ExportCancel);
+        for id in ["page.set_look_all", "page.mark_reviewed", "export.cancel"] {
+            assert!(Command::IDS.contains(&id), "{id} is not in the list of ids");
+        }
+        // Missing parameters are refused, not defaulted.
+        assert!(Command::from_json(r#"{"id":"page.set_look_all","params":{"look":"Grayscale"}}"#).is_err());
+    }
+
+    #[test]
+    fn the_batch_commands_for_selected_pages_parse_and_are_listed() {
+        let rotate = Command::from_json(r#"{"id":"page.rotate_many","params":{"pages":[1,3],"quarter_turns":-1}}"#).unwrap();
+        assert_eq!(rotate, Command::PageRotateMany { pages: vec![PageId(1), PageId(3)], quarter_turns: -1 });
+        let delete = Command::from_json(r#"{"id":"page.delete_many","params":{"pages":[2]}}"#).unwrap();
+        assert_eq!(delete, Command::PageDeleteMany { pages: vec![PageId(2)] });
+        let look = Command::from_json(r#"{"id":"page.set_look_many","params":{"pages":[4,5],"look":"BlackWhite","strength":55}}"#).unwrap();
+        assert_eq!(look, Command::PageSetLookMany { pages: vec![PageId(4), PageId(5)], look: Look::BlackWhite, strength: 55 });
+        for id in ["page.rotate_many", "page.delete_many", "page.set_look_many"] {
+            assert!(Command::IDS.contains(&id), "{id} is not in the list of ids");
+        }
+        // The pages are part of the command: without them there is nothing to act on.
+        assert!(Command::from_json(r#"{"id":"page.delete_many","params":{}}"#).is_err());
+    }
+
+    #[test]
+    fn every_command_serialises_to_an_id_in_the_list_and_every_id_has_a_command() {
+        use crate::recipe::{ExportOptions, FlattenMode, PhotoId};
+        let p = Point::new(1.0, 2.0);
+        let samples = vec![
+            Command::ImportAdd { paths: vec![] },
+            Command::ImportDiscard { item: PhotoId(1) },
+            Command::CropSetCorner { page: PageId(1), corner: Corner::TopLeft, x: 0.0, y: 0.0 },
+            Command::CropMoveSide { page: PageId(1), side: Side::Top, offset: 1.0 },
+            Command::CropBendSide { page: PageId(1), side: Side::Top, handles: [p, p, p] },
+            Command::CropStraightenSide { page: PageId(1), side: Side::Top },
+            Command::CropSetFlatten { page: PageId(1), mode: FlattenMode::Auto },
+            Command::CropBook { on: true },
+            Command::CropSplit { photo: PhotoId(1), on: true },
+            Command::CropSetSpine { photo: PhotoId(1), top: p, bottom: p },
+            Command::CropAuto { page: PageId(1) },
+            Command::CropFullImage { page: PageId(1) },
+            Command::CropApply { photo: PhotoId(1) },
+            Command::PageSetLook { page: PageId(1), look: Look::Original },
+            Command::PageSetStrength { page: PageId(1), value: 1 },
+            Command::PageSetLookAll { look: Look::Original, strength: 1 },
+            Command::PageSetLookMany { pages: vec![PageId(1)], look: Look::Original, strength: 1 },
+            Command::PageRotate { page: PageId(1), quarter_turns: 1 },
+            Command::PageRotateMany { pages: vec![PageId(1)], quarter_turns: 1 },
+            Command::PageAdd { page: PageId(1) },
+            Command::PageMarkReviewed { page: PageId(1) },
+            Command::PageDelete { page: PageId(1) },
+            Command::PageDeleteMany { pages: vec![PageId(1)] },
+            Command::PageMove { from: 0, to: 1 },
+            Command::PageEdit { page: PageId(1) },
+            Command::PageOpenCrop { page: PageId(1) },
+            Command::ReferenceLabel { page: PageId(1), folder: String::new(), category: String::new() },
+            Command::ExportPdf { path: String::new(), options: ExportOptions::default() },
+            Command::ExportCancel,
+            Command::SessionNew,
+            Command::SessionRestore,
+            Command::EditUndo,
+            Command::EditRedo,
+        ];
+        let mut ids: Vec<String> = samples.iter().map(|c| serde_json::to_value(c).unwrap()["id"].as_str().unwrap().to_owned()).collect();
+        for id in &ids {
+            assert!(Command::IDS.contains(&id.as_str()), "{id} is not in the list of ids");
+        }
+        ids.sort_unstable();
+        let mut listed: Vec<String> = Command::IDS.iter().map(|id| (*id).to_owned()).collect();
+        listed.sort_unstable();
+        assert_eq!(ids, listed, "the list of ids and the commands disagree");
     }
 }

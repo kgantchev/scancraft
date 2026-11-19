@@ -6,7 +6,7 @@ use scancraft_core::engine_api::{EngineApi, Notice};
 use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::{Gray8, Rgb8};
 use scancraft_core::recipe::{PageId, PhotoId, RecognizedText, TextLine, Word};
-use scancraft_core::traits::{PageDetector, RecognizeOptions, Recognizer, ServiceError};
+use scancraft_core::traits::{PageDetector, RecognizeOptions, Recognizer, ServiceError, UprightVote, UprightVoter};
 use scancraft_engine::{Engine, EngineOptions, Services};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -152,6 +152,59 @@ impl PageDetector for HeldDetector {
     }
 }
 
+/// A detector that takes its time over the photo whose first pixel's red is `marker`, so that
+/// another photo's page can join the document before it.
+pub struct SlowFor {
+    pub quad: Quad,
+    pub marker: u8,
+    pub delay: Duration,
+}
+
+impl PageDetector for SlowFor {
+    fn detect(&self, photo: &Rgb8) -> Result<Option<Quad>, ServiceError> {
+        if photo.get(0, 0).is_some_and(|p| p[0] == self.marker) {
+            std::thread::sleep(self.delay);
+        }
+        Ok(Some(self.quad))
+    }
+}
+
+/// A recogniser that holds the worker until it is released, then reads one word: with one worker
+/// thread, whatever is queued behind it has to wait.
+pub struct GatedWord {
+    pub gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Recognizer for GatedWord {
+    fn name(&self) -> &str {
+        "fake"
+    }
+
+    fn recognize(&self, page: &Gray8, options: &RecognizeOptions) -> Result<RecognizedText, ServiceError> {
+        if let Ok(gate) = self.gate.lock() {
+            let _ = gate.recv_timeout(Duration::from_secs(20));
+        }
+        OneWord.recognize(page, options)
+    }
+}
+
+/// An upright voter that holds its job until it is released, then votes, surely, for a half turn.
+/// It lets a test finish the page's other background work first.
+pub struct GatedHalfTurn {
+    pub gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl UprightVoter for GatedHalfTurn {
+    fn vote(&self, _: &Gray8) -> Result<UprightVote, ServiceError> {
+        if let Ok(gate) = self.gate.lock() {
+            // Long, so that a slow machine finishes the other work first: the wait ends when the
+            // test releases the gate, or drops it, which it does however it ends.
+            let _ = gate.recv_timeout(Duration::from_secs(300));
+        }
+        Ok(UprightVote { score: [0.0, 0.0, 10.0, 0.0], chars: [0, 0, 100, 0] })
+    }
+}
+
 /// A recogniser that reads one word.
 pub struct OneWord;
 
@@ -222,7 +275,17 @@ pub fn texts(notices: &[Notice]) -> Vec<String> {
     notices.iter().map(|n| n.text.clone()).collect()
 }
 
-/// The photo on Screen 2 and its first pending page.
+/// The page joins the document by itself and the finished page opens. Many tests are about Crop,
+/// so they go on to it: the first photo's page, once, as the first photo used to open.
+pub fn open_crop_on_first_page(engine: &mut Engine) {
+    if engine.view().crop.is_none()
+        && let Some(item) = engine.view().tray.first()
+    {
+        engine.dispatch(scancraft_core::command::Command::PageOpenCrop { page: item.page }).unwrap();
+    }
+}
+
+/// The photo on Screen 2 and its first page.
 pub fn current(engine: &Engine) -> (PhotoId, PageId) {
     let crop = engine.view().crop.expect("Screen 2 should be showing");
     (crop.photo, crop.outlines[0].page)

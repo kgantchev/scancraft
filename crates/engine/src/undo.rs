@@ -306,6 +306,10 @@ fn target(command: &Command) -> Option<(u8, u64)> {
         Command::CropBendSide { page, side, .. } => (2, page.0.wrapping_mul(4).wrapping_add(side.index() as u64)),
         Command::CropSetSpine { photo, .. } => (3, photo.0),
         Command::PageSetStrength { page, .. } => (4, page.0),
+        // Dragging the strength of several pages at once is one drag, whatever the pages are called.
+        Command::PageSetLookMany { pages, .. } => {
+            (5, pages.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, page| (hash ^ page.0).wrapping_mul(0x0100_0000_01b3)))
+        }
         _ => return None,
     })
 }

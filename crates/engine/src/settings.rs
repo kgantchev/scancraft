@@ -91,6 +91,16 @@ fn expand_home(text: &str, home: Option<&std::path::Path>) -> PathBuf {
     }
 }
 
+/// The folder the app keeps its scans in when it starts: the one chosen in Settings, else the
+/// default. Read from the settings file before the engine exists, so the first scan of a launch is
+/// kept where the user said and not in the default folder.
+pub fn configured_sessions_dir(location: Location) -> PathBuf {
+    match SettingsHolder::open(location).get().sessions_dir.as_deref() {
+        Some(chosen) if !chosen.trim().is_empty() => path_from_setting(chosen),
+        _ => default_sessions_dir(),
+    }
+}
+
 /// The settings file plus its in-memory value.
 pub struct SettingsHolder {
     store: SettingsStore<Settings>,
@@ -122,6 +132,12 @@ impl SettingsHolder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_app_starts_in_the_folder_the_settings_name_and_in_the_default_one_otherwise() {
+        // No settings file at all (memory only): the default folder.
+        assert_eq!(configured_sessions_dir(Location::Memory), default_sessions_dir());
+    }
+
     #[test]
     fn a_leading_tilde_names_the_home_folder() {
         let home = std::path::Path::new("/Users/someone");

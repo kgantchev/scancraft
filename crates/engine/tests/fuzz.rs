@@ -15,6 +15,10 @@ const ITERATIONS: usize = 12_000;
 
 struct Fuzz {
     rng: Xorshift64Star,
+    /// The pages and photos the session has now, so most commands name one that exists: pages are
+    /// numbered up from 1 and the numbers run away from any fixed range as photos come and go.
+    pages: Vec<u64>,
+    photos: Vec<u64>,
     files: Vec<String>,
     folder: String,
     out: String,
@@ -35,10 +39,16 @@ impl Fuzz {
     }
 
     fn page(&mut self) -> PageId {
+        if !self.pages.is_empty() && self.rng.below(4) != 0 {
+            return PageId(self.pick(&self.pages.clone()));
+        }
         PageId(if self.rng.below(8) == 0 { self.pick(&[0, u64::MAX, 1 << 40]) } else { self.rng.below(14) })
     }
 
     fn photo(&mut self) -> PhotoId {
+        if !self.photos.is_empty() && self.rng.below(4) != 0 {
+            return PhotoId(self.pick(&self.photos.clone()));
+        }
         PhotoId(if self.rng.below(8) == 0 { self.pick(&[0, u64::MAX, 1 << 40]) } else { self.rng.below(6) })
     }
 
@@ -69,7 +79,7 @@ impl Fuzz {
             }
             // A label touches the disk, so it is rare too. Its folder is the one the photos were
             // imported from (where a label can succeed) or a junk path (where it can't).
-            41..=90 => {
+            41..=190 => {
                 let folder = match self.rng.below(5) {
                     0 => String::new(),
                     1 => "\0".to_string(),
@@ -78,6 +88,20 @@ impl Fuzz {
                 };
                 let category = self.pick(&["", "dark desk", "wood", "not a category", "\0"]).to_string();
                 return Command::ReferenceLabel { page: self.page(), folder, category };
+            }
+            // The commands of the review-first flow are rare too, so the run's other commands keep
+            // the same share of it.
+            191..=210 => return Command::PageMarkReviewed { page: self.page() },
+            211..=230 => {
+                let look = self.pick(&[Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument]);
+                return Command::PageSetLookAll { look, strength: self.rng.below(256) as u8 };
+            }
+            231..=240 => return Command::ExportCancel,
+            241..=250 => return Command::PageRotateMany { pages: vec![self.page(), self.page()], quarter_turns: self.rng.below(256) as u8 as i8 },
+            251..=255 => return Command::PageDeleteMany { pages: vec![self.page(), self.page()] },
+            256..=265 => {
+                let look = self.pick(&[Look::Original, Look::BlackWhite, Look::Grayscale, Look::ColorDocument]);
+                return Command::PageSetLookMany { pages: vec![self.page(), self.page()], look, strength: self.rng.below(256) as u8 };
             }
             _ => {}
         }
@@ -149,14 +173,27 @@ fn run(seed: u64) {
     let files: Vec<String> = (0..4).map(|i| write(&dir, &format!("desk{i}.png"), &desk_png(i))).collect();
     let folder = dir.path().to_string_lossy().into_owned();
     let out = dir.join("fuzz.pdf").to_string_lossy().into_owned();
-    let mut fuzz = Fuzz { rng: Xorshift64Star::new(seed), files, folder, out };
+    let mut fuzz = Fuzz { rng: Xorshift64Star::new(seed), pages: Vec::new(), photos: Vec::new(), files, folder, out };
+    // The run starts from one page and one good label. Which commands the fuzzer can aim at a real
+    // page, and so whether any label gets through, otherwise depends on how fast the workers read
+    // the photos: on a loaded machine the loop ended before a page had joined, and the run wrote no
+    // label at all. With the label there from the start, the junk that follows races a file that
+    // exists, which is what the check at the end is about.
+    engine.dispatch(Command::ImportAdd { paths: vec![fuzz.files[0].clone()] }).expect("the first photo imports");
+    settle(&mut engine);
+    let first = engine.view().tray.first().map(|t| t.page).expect("the first photo's page joins");
+    let label = Command::ReferenceLabel { page: first, folder: fuzz.folder.clone(), category: "dark desk".to_string() };
+    engine.dispatch(label).expect("the first label is written");
     let (mut accepted, mut most_pages) = (0usize, 0usize);
     for i in 0..ITERATIONS {
         let command = fuzz.command();
         if engine.dispatch(command).is_ok() {
             accepted += 1;
         }
-        most_pages = most_pages.max(engine.view().tray.len());
+        let tray = engine.view().tray;
+        most_pages = most_pages.max(tray.len());
+        fuzz.pages = tray.iter().map(|t| t.page.0).collect();
+        fuzz.photos = engine.session().file().photos.iter().map(|p| p.id.0).collect();
         if i % 20 == 0 {
             engine.poll();
         }
@@ -184,8 +221,8 @@ fn run(seed: u64) {
     // Whatever labels were written, the reference loader reads them: a label file is never left
     // half written or with a record it can't use.
     let label_file = std::path::Path::new(&fuzz.folder).join("reference.json");
-    // Some label must have got through, or this checks nothing; the seeds are fixed, so it does.
-    assert!(label_file.exists(), "no label was written in the whole run");
+    // The run's first label is in it, or this checks nothing.
+    assert!(label_file.exists(), "the label file is gone");
     let set = scancraft_synth::datasets::reference::load(std::path::Path::new(&fuzz.folder)).expect("the label file reads");
     assert!(!set.samples.is_empty(), "the label file holds no usable label");
     assert_eq!(set.skipped_count, 0, "a label the loader skips: {:?}", set.skipped);
@@ -226,14 +263,20 @@ fn every_command_id_has_a_command_and_parses_from_json() {
         r#"{"id":"crop.apply","params":{"photo":1}}"#,
         r#"{"id":"page.set_look","params":{"page":1,"look":"Grayscale"}}"#,
         r#"{"id":"page.set_strength","params":{"page":1,"value":70}}"#,
+        r#"{"id":"page.set_look_all","params":{"look":"Grayscale","strength":70}}"#,
+        r#"{"id":"page.set_look_many","params":{"pages":[1,2],"look":"Grayscale","strength":70}}"#,
         r#"{"id":"page.rotate","params":{"page":1,"quarter_turns":-1}}"#,
+        r#"{"id":"page.rotate_many","params":{"pages":[1,2],"quarter_turns":1}}"#,
         r#"{"id":"page.add","params":{"page":1}}"#,
+        r#"{"id":"page.mark_reviewed","params":{"page":1}}"#,
         r#"{"id":"page.delete","params":{"page":1}}"#,
+        r#"{"id":"page.delete_many","params":{"pages":[1,2]}}"#,
         r#"{"id":"page.move","params":{"from":0,"to":1}}"#,
         r#"{"id":"page.edit","params":{"page":1}}"#,
         r#"{"id":"page.open_crop","params":{"page":1}}"#,
         r#"{"id":"reference.label","params":{"page":1,"folder":"/definitely/not/here","category":"wood"}}"#,
         r#"{"id":"export.pdf","params":{"path":"a.pdf","options":{"page_size":"Auto","quality":"Best","searchable":true,"languages":[]}}}"#,
+        r#"{"id":"export.cancel"}"#,
         r#"{"id":"session.new"}"#,
         r#"{"id":"session.restore"}"#,
         r#"{"id":"edit.undo"}"#,

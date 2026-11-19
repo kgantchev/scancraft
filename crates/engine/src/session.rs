@@ -189,9 +189,33 @@ impl Session {
         self.file.pages.iter().any(|p| p.id == id)
     }
 
-    /// The pages cut from a photo, pending ones first (they are the ones being worked on), then the tray's.
+    /// The pages cut from a photo, in the order of the document. (Pending pages, which only a
+    /// session saved by an earlier version has, come first; the engine moves them into the
+    /// document when it opens the session.)
     pub fn pages_of(&self, photo: PhotoId) -> Vec<&Page> {
         self.pending.iter().chain(&self.file.pages).filter(|p| p.photo == photo).collect()
+    }
+
+    /// Where a new page of `photo` goes in the document so the pages stay in the order of the
+    /// photos: after the last page of this photo or of an earlier one. A document the user has
+    /// put in another order keeps the pages it has where they are.
+    pub fn insert_index(&self, photo: PhotoId) -> usize {
+        let position = |id: PhotoId| self.file.photos.iter().position(|p| p.id == id);
+        let Some(mine) = position(photo) else { return self.file.pages.len() };
+        self.file.pages.iter().rposition(|p| position(p.photo).is_some_and(|at| at <= mine)).map_or(0, |at| at + 1)
+    }
+
+    /// Moves the pages of a session saved by an earlier version, which kept the pages being
+    /// corrected apart from the document, into the document in the order of their photos. Returns
+    /// how many it moved.
+    pub fn graduate_pending(&mut self) -> usize {
+        let pending = std::mem::take(&mut self.pending);
+        let count = pending.len();
+        for page in pending {
+            let at = self.insert_index(page.photo);
+            self.file.pages.insert(at.min(self.file.pages.len()), page);
+        }
+        count
     }
 
     /// `sources/<hex sha-256>`.
@@ -366,6 +390,71 @@ mod tests {
         let (c, d) = (back.allocate_photo_id(), back.allocate_photo_id());
         // The ids can't go on past the end; none of this may panic, and they stay in the range.
         assert!(a.0 >= u64::MAX - 1 && b.0 >= u64::MAX - 1 && c.0 >= u64::MAX - 1 && d.0 >= u64::MAX - 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_page_goes_after_the_pages_of_its_photo_and_of_the_photos_before_it() {
+        let dir = temp("insert-index");
+        let mut s = Session::create(&dir).unwrap();
+        for id in 1..=3 {
+            s.file_mut().photos.push(photo(id));
+        }
+        // Photo 1 has a page, photo 3 has a page, photo 2 is still being read.
+        s.file_mut().pages.push(page(10, 1));
+        s.file_mut().pages.push(page(30, 3));
+        assert_eq!(s.insert_index(PhotoId(2)), 1, "photo 2's page goes between photo 1's and photo 3's");
+        assert_eq!(s.insert_index(PhotoId(1)), 1, "the second page of photo 1 goes after the first");
+        assert_eq!(s.insert_index(PhotoId(3)), 2);
+        // A photo the session doesn't know goes last.
+        assert_eq!(s.insert_index(PhotoId(99)), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_pages_of_an_older_session_move_into_the_document_in_photo_order() {
+        let dir = temp("graduate");
+        let mut s = Session::create(&dir).unwrap();
+        for id in 1..=3 {
+            s.file_mut().photos.push(photo(id));
+        }
+        s.file_mut().pages.push(page(20, 2));
+        s.pending_mut().push(page(30, 3));
+        s.pending_mut().push(page(10, 1));
+        assert_eq!(s.graduate_pending(), 2);
+        let order: Vec<u64> = s.file().pages.iter().map(|p| p.id.0).collect();
+        assert_eq!(order, vec![10, 20, 30]);
+        assert!(s.pending().is_empty());
+        // Nothing is left to move the second time.
+        assert_eq!(s.graduate_pending(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_engine_opens_a_session_saved_with_pending_pages_with_every_page_in_the_document() {
+        use scancraft_core::engine_api::{EngineApi, Screen};
+        let dir = temp("legacy-pending");
+        let mut s = Session::create(&dir).unwrap();
+        for id in 1..=2 {
+            s.file_mut().photos.push(photo(id));
+        }
+        // An earlier version: photo 1's page was added, photo 2's was still being corrected.
+        s.file_mut().pages.push(page(10, 1));
+        s.pending_mut().push(page(20, 2));
+        s.save().unwrap();
+        drop(s);
+        let mut options = crate::EngineOptions::new(dir.clone(), crate::Services::default());
+        options.settings = craft_settings::Location::Memory;
+        options.threads = 1;
+        let engine = crate::Engine::open(options).unwrap();
+        let view = engine.view();
+        assert_eq!(view.tray.iter().map(|t| t.page.0).collect::<Vec<_>>(), vec![10, 20]);
+        assert!(engine.session().pending().is_empty());
+        // The finished first page opens, as it does for any session that has pages.
+        assert_eq!(view.screen, Screen::Enhance(PageId(10)));
+        drop(engine);
+        // And the sidecar is gone from the folder once the session is saved again.
+        assert!(!dir.join("pending.json").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

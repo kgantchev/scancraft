@@ -31,7 +31,7 @@ use crate::undo::{Snapshot, UndoStack};
 use crate::work::JobOutput;
 use craft_settings::Location;
 use scancraft_core::command::Command;
-use scancraft_core::engine_api::{EngineApi, ImageKey, LoupeCrop, Notice, Screen, ViewState};
+use scancraft_core::engine_api::{EngineApi, ExportSummary, ImageKey, LoupeCrop, Notice, Screen, ViewState};
 use scancraft_core::geom::{Point, Quad};
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{CornerOrigin, Look, PageId, PhotoId, SideShape};
@@ -137,8 +137,27 @@ pub struct Engine {
     pub(crate) failed: HashSet<u64>,
     pub(crate) pending_notices: Vec<Notice>,
     pub(crate) visible_notices: Vec<Notice>,
-    pub(crate) export_confirmed: bool,
-    pub(crate) exporting: Option<Screen>,
+    /// A PDF is being written. The screen is not changed for it: the interface shows the export
+    /// from the view's progress.
+    pub(crate) exporting: bool,
+    /// How many pages the running export has written, and how many it will write.
+    pub(crate) export_done: Arc<std::sync::atomic::AtomicU32>,
+    pub(crate) export_total: u32,
+    /// The user asked `export.cancel`, so the export's cancellation is not the pages changing.
+    pub(crate) export_cancelled: bool,
+    /// The PDF the last export wrote.
+    pub(crate) last_export: Option<ExportSummary>,
+    /// Pages the user has looked at and left as they are, so they are no longer flagged.
+    pub(crate) reviewed: HashSet<PageId>,
+    /// Why a page's picture could not be made, for the page's state.
+    pub(crate) page_failures: HashMap<PageId, String>,
+    /// The tags of the background jobs a page has running, so the page can say it is still being
+    /// prepared, and how many pages are still being read.
+    pub(crate) flatten_tags: HashMap<PageId, u64>,
+    pub(crate) upright_tags: HashMap<PageId, u64>,
+    pub(crate) text_tags: HashMap<PageId, u64>,
+    /// How many photos the import now running added, for its progress.
+    pub(crate) batch_total: u32,
     pub(crate) restore_offer: Option<u32>,
     pub(crate) last_look: Look,
     pub(crate) loupe: Option<LoupeState>,
@@ -182,11 +201,18 @@ impl Engine {
     pub fn open(options: EngineOptions) -> Result<Engine, EngineError> {
         let mut session = Session::open(options.session_dir.clone())?;
         let repairs = session.take_repairs();
+        // A session saved by an earlier version kept the pages being corrected apart from the
+        // document; now every page is in it.
+        let moved = session.graduate_pending();
         let mut engine = Engine::from_session(session, options);
         for r in repairs {
             engine.notify(format!("The saved session was repaired: {r}."), false);
         }
+        if moved > 0 {
+            engine.mark_dirty();
+        }
         engine.resume();
+        engine.open_first_page();
         Ok(engine)
     }
 
@@ -221,8 +247,17 @@ impl Engine {
             failed: HashSet::new(),
             pending_notices: Vec::new(),
             visible_notices: Vec::new(),
-            export_confirmed: false,
-            exporting: None,
+            exporting: false,
+            export_done: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            export_total: 0,
+            export_cancelled: false,
+            last_export: None,
+            reviewed: HashSet::new(),
+            page_failures: HashMap::new(),
+            flatten_tags: HashMap::new(),
+            upright_tags: HashMap::new(),
+            text_tags: HashMap::new(),
+            batch_total: 0,
             restore_offer,
             last_look: Look::ColorDocument,
             loupe: None,
@@ -244,6 +279,7 @@ impl Engine {
     /// Picks up where a restored session left off: photos whose detection never finished are detected again.
     pub(crate) fn resume(&mut self) {
         let items: Vec<_> = self.session.file().photos.clone();
+        self.batch_total = items.iter().filter(|item| item.size == (0, 0)).count() as u32;
         for item in items {
             if item.size == (0, 0) {
                 self.status.insert(item.id, PhotoStatus::Pending);
@@ -259,7 +295,7 @@ impl Engine {
 
     /// Whether a PDF is being written now, so the app asks before it quits (§4.8).
     pub fn is_exporting(&self) -> bool {
-        self.exporting.is_some()
+        self.exporting
     }
 
     pub fn session_dir(&self) -> &PathBuf {
@@ -281,6 +317,14 @@ impl Engine {
     /// Changes the settings; they are written shortly after.
     pub fn set_settings(&mut self, f: impl FnOnce(&mut Settings)) {
         self.settings.update(f);
+        // A new scans folder takes effect at once: the next new scan is made there, and the last
+        // unfinished scan is looked for there. The scan that is open stays where it is.
+        let chosen = self.settings.get().sessions_dir.as_deref().map(crate::settings::path_from_setting);
+        if let Some(root) = chosen.filter(|root| *root != self.root) {
+            self.restore_offer =
+                session::list_sessions(&root).into_iter().find(|s| !s.exported && s.pages > 0 && s.dir != *self.session.dir()).map(|s| s.pages);
+            self.root = root;
+        }
     }
 
     /// Replaces the clock the undo coalescing and the save interval read, in milliseconds (for tests).
@@ -350,6 +394,8 @@ impl Engine {
 
     /// Cancels the jobs of a page whose recipe changed.
     pub(crate) fn cancel_page(&mut self, page: PageId) {
+        // A page whose picture could not be made gets another chance with its new recipe.
+        self.page_failures.remove(&page);
         for target in [Target::Page(page), Target::Preview(page)] {
             if let Some(t) = self.tokens.remove(&target) {
                 t.cancel();
@@ -390,13 +436,13 @@ impl Engine {
         self.mark_dirty();
     }
 
-    /// Waits for the job queue to empty, applying results as they come; true when it emptied in time.
+    /// Waits until no work is left, applying results as they come (and the jobs they queue in turn);
+    /// true when that happened in time.
     pub fn wait_idle(&mut self, timeout: std::time::Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
             self.poll();
-            if self.jobs.pending() == 0 {
-                self.poll();
+            if self.jobs.unclaimed() == 0 {
                 return true;
             }
             if Instant::now() >= deadline {

@@ -15,6 +15,7 @@ fn import_desk(engine: &mut scancraft_engine::Engine, dir: &TempDir, seed: u8) {
     let path = write(dir, &format!("desk{seed}.png"), &desk_png(seed));
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(engine);
+    open_crop_on_first_page(engine);
 }
 
 /// The view with the redo flag aside: undoing leaves a step to redo, which the earlier view didn't have.
@@ -32,7 +33,32 @@ fn engine_with_photo(dir: &TempDir) -> scancraft_engine::Engine {
 // ---- importing and detecting ----
 
 #[test]
-fn the_first_photo_opens_screen_two_with_the_outline_a_detector_found() {
+fn a_photo_joins_the_document_as_a_finished_page_when_it_has_been_read() {
+    let dir = TempDir::new("joins");
+    let mut engine = open(&dir, services(desk_quad()));
+    let path = write(&dir, "desk0.png", &desk_png(0));
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    // Nothing is in the document while the photo is being read, and the view says how far along it is.
+    assert!(engine.view().tray.is_empty());
+    assert_eq!(engine.view().importing, Some(scancraft_core::engine_api::Progress { done: 0, total: 1 }));
+    settle(&mut engine);
+    let view = engine.view();
+    assert!(view.importing.is_none());
+    // The page is in the document, with no Add Page: cut from the outline the detector found, in
+    // the last look used, and the first page opens finished.
+    assert_eq!(view.tray.len(), 1);
+    assert_eq!(view.tray[0].state, scancraft_core::engine_api::PageState::Ready);
+    let Screen::Enhance(page) = view.screen else { panic!("the finished page should be open: {:?}", view.screen) };
+    assert_eq!(page, view.tray[0].page);
+    let page = engine.session().page(page).expect("the page").clone();
+    assert!(matches!(page.corners_from, CornerOrigin::Detected { .. }));
+    assert_eq!(page.look, Look::ColorDocument);
+    assert!(page.proportions.is_some() && page.page_size_mm.is_some(), "the geometry step ran");
+    assert!(engine.session().pending().is_empty());
+}
+
+#[test]
+fn opening_crop_on_a_page_shows_the_outline_a_detector_found() {
     let dir = TempDir::new("detect");
     let engine = engine_with_photo(&dir);
     let view = engine.view();
@@ -48,7 +74,9 @@ fn the_first_photo_opens_screen_two_with_the_outline_a_detector_found() {
     for (got, want) in outline.corners.0.iter().zip(desk_quad().0) {
         assert!(got.distance(want) < 20.0, "{got:?} vs {want:?}");
     }
-    assert!(view.tray.is_empty());
+    // The page being cropped is in the document the whole time.
+    assert_eq!(view.tray.len(), 1);
+    assert_eq!(view.tray[0].page, outline.page);
 }
 
 #[test]
@@ -131,7 +159,473 @@ fn a_photo_that_is_still_being_read_keeps_the_view_busy_until_it_is_ready() {
     gate.send(()).unwrap();
     settle(&mut engine);
     assert!(!engine.view().busy);
-    assert!(matches!(engine.view().screen, Screen::Crop(_)));
+    // The page joined and opened, finished.
+    assert!(matches!(engine.view().screen, Screen::Enhance(_)));
+    assert_eq!(engine.view().tray.len(), 1);
+}
+
+// ---- the review-first contract (the engine answers it before it does it) ----
+
+#[test]
+fn a_tray_page_names_its_photo_and_is_ready_and_no_work_is_reported_when_idle() {
+    let dir = TempDir::new("tray-contract");
+    let mut engine = engine_with_photo(&dir);
+    let (photo, page) = current(&engine);
+    let view = engine.view();
+    assert_eq!(view.tray.len(), 1);
+    assert_eq!(view.tray[0].page, page);
+    assert_eq!(view.tray[0].photo, photo);
+    assert_eq!(view.tray[0].state, scancraft_core::engine_api::PageState::Ready);
+    assert!(view.importing.is_none() && view.reading_text.is_none() && view.exporting.is_none() && view.last_export.is_none());
+    // There is nothing to add: the page is already in the document.
+    let error = engine.dispatch(Command::PageAdd { page }).unwrap_err();
+    assert!(error.contains("already in the document"), "{error}");
+}
+
+// ---- the review-first flow ----
+
+use scancraft_core::engine_api::{PageState, Progress, ReviewReason};
+
+/// A photo with nothing on it that looks like a page, so detection finds none.
+fn blank_png() -> Vec<u8> {
+    png(160, 120, |_, _| [128, 128, 128])
+}
+
+#[test]
+fn a_page_whose_edges_were_not_found_joins_flagged_and_is_cleared_by_looking_at_it() {
+    let dir = TempDir::new("flag");
+    let mut engine = open(&dir, Services::default());
+    let path = write(&dir, "blank.png", &blank_png());
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let page = engine.view().tray[0].page;
+    assert_eq!(engine.view().tray[0].state, PageState::NeedsLook(ReviewReason::NotFound));
+    // Marking it reviewed takes the flag off; it is not an undo step and changes no page.
+    let before = engine.session().file().pages.clone();
+    engine.dispatch(Command::PageMarkReviewed { page }).unwrap();
+    assert_eq!(engine.view().tray[0].state, PageState::Ready);
+    assert_eq!(engine.session().file().pages, before);
+    assert!(engine.dispatch(Command::PageMarkReviewed { page: PageId(9999) }).is_err());
+}
+
+#[test]
+fn moving_a_corner_or_pressing_done_takes_the_flag_off() {
+    for how in ["corner", "done"] {
+        let dir = TempDir::new("flag-clear");
+        let mut engine = open(&dir, Services::default());
+        let path = write(&dir, "blank.png", &blank_png());
+        engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+        settle(&mut engine);
+        open_crop_on_first_page(&mut engine);
+        let (photo, page) = current(&engine);
+        assert_eq!(engine.view().tray[0].state, PageState::NeedsLook(ReviewReason::NotFound));
+        if how == "corner" {
+            // The corner is the user's now, so the outline is no longer a guess.
+            engine.dispatch(Command::CropSetCorner { page, corner: Corner::TopLeft, x: 10.0, y: 10.0 }).unwrap();
+        } else {
+            engine.dispatch(Command::CropApply { photo }).unwrap();
+        }
+        settle(&mut engine);
+        assert_eq!(engine.view().tray[0].state, PageState::Ready, "after {how}");
+    }
+}
+
+#[test]
+fn a_page_with_an_invalid_outline_is_flagged() {
+    let dir = TempDir::new("flag-invalid");
+    let mut engine = engine_with_photo(&dir);
+    let (_, page) = current(&engine);
+    assert_eq!(engine.view().tray[0].state, PageState::Ready);
+    engine.dispatch(Command::CropSetCorner { page, corner: Corner::TopLeft, x: -1.0e9, y: 1.0e9 }).unwrap();
+    assert_eq!(engine.view().tray[0].state, PageState::NeedsLook(ReviewReason::InvalidOutline));
+}
+
+#[test]
+fn a_page_says_it_is_preparing_while_it_is_being_flattened() {
+    let dir = TempDir::new("preparing");
+    let mut engine = engine_with_photo(&dir);
+    let (photo, _) = current(&engine);
+    settle(&mut engine);
+    engine.dispatch(Command::CropApply { photo }).unwrap();
+    // The flatten decision runs in the background, and the page is not final until it is done.
+    assert_eq!(engine.view().tray[0].state, PageState::Preparing);
+    settle(&mut engine);
+    assert_eq!(engine.view().tray[0].state, PageState::Ready);
+}
+
+#[test]
+fn a_page_whose_picture_cannot_be_made_says_why() {
+    let dir = TempDir::new("failed-state");
+    let mut engine = engine_with_photo(&dir);
+    settle(&mut engine);
+    engine.flush();
+    drop(engine);
+    let sources = dir.path().join("Scan A").join("sources");
+    for entry in std::fs::read_dir(&sources).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let mut engine = open(&dir, services(desk_quad()));
+    let page = engine.view().tray[0].page;
+    for _ in 0..100 {
+        engine.poll();
+        let _ = engine.image(ImageKey::TrayThumb(page));
+        if matches!(engine.view().tray[0].state, PageState::Failed(_)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let PageState::Failed(why) = engine.view().tray[0].state.clone() else { panic!("{:?}", engine.view().tray[0].state) };
+    assert!(!why.is_empty());
+    // Changing the page's outline gives it another chance, so the failure is forgotten.
+    open_crop_on_first_page(&mut engine);
+    engine.dispatch(Command::CropFullImage { page }).unwrap();
+    assert!(!matches!(engine.view().tray[0].state, PageState::Failed(_)));
+}
+
+#[test]
+fn pages_join_the_document_in_photo_order_without_taking_the_screen() {
+    let dir = TempDir::new("order");
+    let slow = SlowFor { quad: desk_quad(), marker: 40, delay: std::time::Duration::from_millis(400) };
+    let services = Services { detector: Some(Arc::new(slow)), recognizer: None, upright: None };
+    let mut engine = open(&dir, services);
+    // The first photo is slow to read; the second is quick.
+    let first = write(&dir, "a.png", &desk_png(0));
+    let second = write(&dir, "b.png", &desk_png(1));
+    engine.dispatch(Command::ImportAdd { paths: vec![first, second] }).unwrap();
+    assert_eq!(engine.view().importing, Some(Progress { done: 0, total: 2 }));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.view().tray.is_empty() && std::time::Instant::now() < end {
+        engine.poll();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    // The second photo's page joined first, and it is the page that opened.
+    let photos: Vec<_> = engine.session().file().photos.iter().map(|p| p.id).collect();
+    assert_eq!(engine.view().tray.len(), 1);
+    assert_eq!(engine.view().tray[0].photo, photos[1]);
+    assert_eq!(engine.view().importing, Some(Progress { done: 1, total: 2 }));
+    let opened = engine.view().tray[0].page;
+    assert_eq!(engine.view().screen, Screen::Enhance(opened));
+    settle(&mut engine);
+    // The first photo's page then took its place before the second's, and the screen stayed put.
+    let tray = engine.view().tray;
+    assert_eq!(tray.iter().map(|t| t.photo).collect::<Vec<_>>(), photos);
+    assert_eq!(engine.view().screen, Screen::Enhance(opened));
+    assert!(engine.view().importing.is_none());
+}
+
+#[test]
+fn cropping_a_page_in_the_document_keeps_its_place_its_look_and_its_strength() {
+    // Re-cropping a page reset its strength, and a page in the document could not be cropped at all.
+    let dir = TempDir::new("recrop");
+    let mut engine = open(&dir, services(desk_quad()));
+    for seed in 0..3 {
+        import_desk(&mut engine, &dir, seed);
+    }
+    let ids: Vec<PageId> = engine.view().tray.iter().map(|t| t.page).collect();
+    // The middle page, in its own look.
+    engine.dispatch(Command::PageOpenCrop { page: ids[1] }).unwrap();
+    let (photo, page) = current(&engine);
+    assert_eq!(page, ids[1]);
+    engine.dispatch(Command::PageSetLook { page, look: Look::BlackWhite }).unwrap();
+    engine.dispatch(Command::PageSetStrength { page, value: 33 }).unwrap();
+    settle(&mut engine);
+    assert!(engine.view().tray[1].text_ready);
+    engine.dispatch(Command::CropSetCorner { page, corner: Corner::BottomRight, x: 120.0, y: 95.0 }).unwrap();
+    // The recognised text belonged to the old outline.
+    assert!(!engine.view().tray[1].text_ready);
+    engine.dispatch(Command::CropApply { photo }).unwrap();
+    let view = engine.view();
+    assert_eq!(view.screen, Screen::Enhance(page));
+    assert_eq!(view.tray.iter().map(|t| t.page).collect::<Vec<_>>(), ids, "the page kept its place");
+    let kept = engine.session().page(page).unwrap().clone();
+    assert_eq!((kept.look, kept.strength), (Look::BlackWhite, 33));
+    assert_eq!(kept.corners.0[2], Point::new(120.0, 95.0));
+    assert!(kept.proportions.is_some(), "the geometry was worked out again");
+    // And the text is read again, for the new outline.
+    settle(&mut engine);
+    assert!(engine.view().tray[1].text_ready);
+}
+
+#[test]
+fn the_window_is_never_empty_while_the_document_has_pages() {
+    let dir = TempDir::new("never-empty");
+    let mut engine = open(&dir, services(desk_quad()));
+    for seed in 0..2 {
+        import_desk(&mut engine, &dir, seed);
+    }
+    let photos: Vec<_> = engine.session().file().photos.iter().map(|p| p.id).collect();
+    // Removing the photo that is open shows the other page.
+    engine.dispatch(Command::ImportDiscard { item: photos[0] }).unwrap();
+    assert!(matches!(engine.view().screen, Screen::Enhance(_)), "{:?}", engine.view().screen);
+    assert_eq!(engine.view().tray.len(), 1);
+    // Deleting the last page is the only way to the empty window.
+    let last = engine.view().tray[0].page;
+    engine.dispatch(Command::PageDelete { page: last }).unwrap();
+    assert_eq!(engine.view().screen, Screen::Import);
+    assert!(engine.session().file().photos.is_empty(), "the photo went with its last page");
+}
+
+#[test]
+fn a_look_for_every_page_is_one_undo_step() {
+    let dir = TempDir::new("look-all");
+    let mut engine = open(&dir, services(desk_quad()));
+    for seed in 0..3 {
+        import_desk(&mut engine, &dir, seed);
+    }
+    let clock = Arc::new(AtomicU64::new(0));
+    let c = clock.clone();
+    engine.set_clock(move || c.load(Ordering::Relaxed));
+    let before: Vec<_> = engine.session().file().pages.iter().map(|p| (p.look, p.strength)).collect();
+    clock.fetch_add(10_000, Ordering::Relaxed);
+    engine.dispatch(Command::PageSetLookAll { look: Look::Grayscale, strength: 41 }).unwrap();
+    let all = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| (p.look, p.strength)).collect::<Vec<_>>();
+    assert_eq!(all(&engine), vec![(Look::Grayscale, 41); 3]);
+    // A look with no strength has none, whatever was asked, and is the next page's starting look too.
+    clock.fetch_add(10_000, Ordering::Relaxed);
+    engine.dispatch(Command::PageSetLookAll { look: Look::Original, strength: 90 }).unwrap();
+    assert_eq!(all(&engine), vec![(Look::Original, 0); 3]);
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(all(&engine), vec![(Look::Grayscale, 41); 3], "one undo takes back every page");
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(all(&engine), before);
+    // Nothing to change in an empty document.
+    let empty = TempDir::new("look-all-empty");
+    let mut none = open(&empty, services(desk_quad()));
+    assert!(none.dispatch(Command::PageSetLookAll { look: Look::Grayscale, strength: 50 }).is_err());
+}
+
+#[test]
+fn cancelling_an_export_writes_no_file_and_says_so_and_the_next_export_works() {
+    let dir = TempDir::new("cancel");
+    let (gate, held) = std::sync::mpsc::channel();
+    // One worker thread, held by the text reading, so the export has to wait behind it.
+    let services = Services {
+        detector: Some(Arc::new(FixedDetector(desk_quad()))),
+        recognizer: Some(Arc::new(GatedWord { gate: std::sync::Mutex::new(held) })),
+        upright: None,
+    };
+    let mut engine = open_with(dir.path(), "Scan A", services, 1);
+    let path = write(&dir, "desk.png", &desk_png(0));
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.view().reading_text.is_none() && std::time::Instant::now() < end {
+        engine.poll();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(engine.view().reading_text.is_some(), "the text is being read");
+    assert!(engine.dispatch(Command::ExportCancel).is_err(), "nothing to cancel yet");
+    let out = dir.join("never.pdf");
+    engine.dispatch(Command::ExportPdf { path: out.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
+    assert_eq!(engine.view().exporting, Some(Progress { done: 0, total: 1 }));
+    engine.dispatch(Command::ExportCancel).unwrap();
+    gate.send(()).unwrap();
+    let notices = texts(&settle(&mut engine));
+    assert!(notices.iter().any(|n| n.contains("cancelled")), "{notices:?}");
+    assert!(!notices.iter().any(|n| n.contains("pages changed")), "{notices:?}");
+    assert!(!out.exists(), "a cancelled export left a file");
+    assert!(engine.view().exporting.is_none() && engine.view().last_export.is_none());
+    assert!(!engine.is_exporting());
+    // The next export goes through.
+    let again = dir.join("again.pdf");
+    engine.dispatch(Command::ExportPdf { path: again.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
+    settle(&mut engine);
+    assert!(again.is_file());
+    assert_eq!(engine.view().last_export.map(|s| s.pages), Some(1));
+}
+
+#[test]
+fn the_original_preview_is_the_page_without_its_filter() {
+    let dir = TempDir::new("original");
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(&dir, services(quad));
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    settle(&mut engine);
+    let page = engine.view().tray[0].page;
+    engine.dispatch(Command::PageSetLook { page, look: Look::BlackWhite }).unwrap();
+    let (filtered, _) = wait_for_image(&mut engine, ImageKey::LookPreview(page));
+    let (original, notices) = wait_for_image(&mut engine, ImageKey::OriginalPreview(page));
+    let (filtered, original) = (filtered.expect("the filtered page"), original.expect("the original page"));
+    assert!(notices.is_empty(), "{notices:?}");
+    assert!(original.width().max(original.height()) <= 1280);
+    assert_ne!(original.data(), filtered.data(), "Black & White changed nothing");
+    // With no filter on the page, the two are the same picture.
+    engine.dispatch(Command::PageSetLook { page, look: Look::Original }).unwrap();
+    let (plain, _) = wait_for_image(&mut engine, ImageKey::LookPreview(page));
+    assert_eq!(plain.expect("the page").data(), original.data());
+    assert!(engine.image(ImageKey::OriginalPreview(PageId(555))).is_none());
+}
+
+#[test]
+fn the_engine_is_busy_until_a_finished_job_has_been_applied() {
+    // A job's result is applied by `poll`, and applying it queues what comes next: the page joins
+    // the document, is turned upright, flattened and read. `busy` went false as soon as the last
+    // worker finished, before `poll` had applied that result, so anyone who waited for "not busy"
+    // could stop with the pipeline half done: a PDF with a page unfinished, on a slow machine.
+    let dir = TempDir::new("busy-until-applied");
+    let (bytes, quad) = flat_fixture();
+    let mut engine = open(&dir, services(quad));
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    // Time for the workers to finish, and no `poll`: nothing they made has been applied.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(engine.view().busy, "the engine says it is idle while a result is waiting to be applied");
+    settle(&mut engine);
+    assert!(!engine.view().busy);
+    assert_eq!(engine.view().tray.len(), 1, "the page did not join the document");
+}
+
+#[test]
+fn the_automatic_turn_is_kept_when_the_flattening_finishes_before_it() {
+    // The turn is decided from the page as it was when the page joined, and the flattening that is
+    // decided at the same time changes the page's sheet. The turn was dropped as stale whenever the
+    // flattening came back first, so whether a page was turned depended on which of the two the
+    // workers finished first: one thread and eight made different pages. Here the turn is held back
+    // until the flattening has landed, which is the order that lost it.
+    let dir = TempDir::new("turn-after-flatten");
+    let (bytes, quad) = flat_fixture();
+    let (release, gate) = std::sync::mpsc::channel();
+    let mut services = services(quad);
+    services.upright = Some(Arc::new(GatedHalfTurn { gate: std::sync::Mutex::new(gate) }));
+    // One worker: the jobs run in the order they were queued, the flattening first, and the
+    // voter holds the only worker. With two, a worker waiting inside the flattening's parallel
+    // work could pick up the held job and block there, with the flattening beneath it.
+    let mut engine = open_with(dir.path(), "Scan A", services, 1);
+    let path = write(&dir, "flat.png", &bytes);
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    // About a second on a free machine; the limit is only there to end a hang.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while engine.session().file().pages.first().is_none_or(|p| p.sheet.is_none()) {
+        assert!(std::time::Instant::now() < end, "the flattening never came back");
+        engine.poll();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(engine.session().file().pages[0].quarter_turns, 0, "the turn came back before it was released");
+    release.send(()).unwrap();
+    settle(&mut engine);
+    assert_eq!(engine.session().file().pages[0].quarter_turns, 2, "the turn was dropped because the flattening came back first");
+}
+
+#[test]
+fn the_original_preview_does_not_depend_on_the_number_of_threads() {
+    let (bytes, quad) = flat_fixture();
+    let mut pictures = Vec::new();
+    for threads in [1, 8] {
+        let dir = TempDir::new("original-threads");
+        let mut engine = open_with(dir.path(), "Scan A", services(quad), threads);
+        let path = write(&dir, "flat.png", &bytes);
+        engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+        settle(&mut engine);
+        let page = engine.view().tray[0].page;
+        engine.dispatch(Command::PageSetLook { page, look: Look::Grayscale }).unwrap();
+        let (original, _) = wait_for_image(&mut engine, ImageKey::OriginalPreview(page));
+        pictures.push(original.expect("the original page").data().to_vec());
+    }
+    assert!(pictures[0] == pictures[1], "one thread and eight threads made different pictures");
+}
+
+// ---- several pages at once ----
+
+fn engine_with_four_pages(dir: &TempDir) -> (scancraft_engine::Engine, Vec<PageId>) {
+    let mut engine = open(dir, services(desk_quad()));
+    for seed in 0..4 {
+        import_desk(&mut engine, dir, seed);
+    }
+    let ids = engine.view().tray.iter().map(|t| t.page).collect();
+    (engine, ids)
+}
+
+#[test]
+fn a_look_for_the_selected_pages_changes_those_pages_in_one_undo_step() {
+    let dir = TempDir::new("look-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let looks = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| (p.look, p.strength)).collect::<Vec<_>>();
+    let before = looks(&engine);
+    // Named out of order, one twice: the pages are changed once each.
+    engine.dispatch(Command::PageSetLookMany { pages: vec![ids[2], ids[0], ids[2]], look: Look::Grayscale, strength: 33 }).unwrap();
+    let after = looks(&engine);
+    assert_eq!(after[0], (Look::Grayscale, 33));
+    assert_eq!(after[2], (Look::Grayscale, 33));
+    assert_eq!((after[1], after[3]), (before[1], before[3]), "a page that was not selected changed");
+    // A look with no strength has none, whatever was asked.
+    engine.dispatch(Command::PageSetLookMany { pages: vec![ids[1]], look: Look::Original, strength: 80 }).unwrap();
+    assert_eq!(looks(&engine)[1], (Look::Original, 0));
+    engine.dispatch(Command::EditUndo).unwrap();
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(looks(&engine), before, "two undos take both batches back");
+}
+
+#[test]
+fn dragging_the_strength_of_the_selected_pages_is_one_undo_step() {
+    let dir = TempDir::new("strength-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let c = clock.clone();
+    engine.set_clock(move || c.load(Ordering::Relaxed));
+    let strengths = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| p.strength).collect::<Vec<_>>();
+    let before = strengths(&engine);
+    // Sixty events of one drag on the same two pages, 10 ms apart.
+    for value in 0..60u8 {
+        clock.fetch_add(10, Ordering::Relaxed);
+        engine.dispatch(Command::PageSetLookMany { pages: vec![ids[0], ids[2]], look: Look::Grayscale, strength: value }).unwrap();
+    }
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(strengths(&engine), before, "one undo did not take the whole drag back");
+}
+
+#[test]
+fn the_selected_pages_are_turned_together_and_one_undo_turns_them_back() {
+    let dir = TempDir::new("rotate-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    settle(&mut engine);
+    let turns = |e: &scancraft_engine::Engine| e.session().file().pages.iter().map(|p| p.quarter_turns).collect::<Vec<_>>();
+    let before = turns(&engine);
+    engine.dispatch(Command::PageRotateMany { pages: vec![ids[1], ids[3]], quarter_turns: 1 }).unwrap();
+    let after = turns(&engine);
+    assert_eq!(after[1], (before[1] + 1) % 4);
+    assert_eq!(after[3], (before[3] + 1) % 4);
+    assert_eq!((after[0], after[2]), (before[0], before[2]));
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(turns(&engine), before);
+    settle(&mut engine);
+}
+
+#[test]
+fn the_selected_pages_are_deleted_together_and_the_window_is_not_left_empty() {
+    let dir = TempDir::new("delete-many");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let before = engine.view();
+    engine.dispatch(Command::PageDeleteMany { pages: vec![ids[0], ids[2]] }).unwrap();
+    let view = engine.view();
+    assert_eq!(view.tray.iter().map(|t| t.page).collect::<Vec<_>>(), vec![ids[1], ids[3]]);
+    // The photos of the deleted pages went with them, and what is open is a page that is left.
+    assert_eq!(engine.session().file().photos.len(), 2);
+    assert!(matches!(view.screen, Screen::Enhance(p) if view.tray.iter().any(|t| t.page == p)), "{:?}", view.screen);
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert_eq!(engine.view().tray, before.tray, "one undo brings every page back");
+    // All of them is allowed, and is the one way to the empty window.
+    engine.dispatch(Command::PageDeleteMany { pages: ids.clone() }).unwrap();
+    assert!(engine.view().tray.is_empty());
+    assert_eq!(engine.view().screen, Screen::Import);
+}
+
+#[test]
+fn a_batch_that_names_a_page_that_is_not_there_changes_nothing() {
+    let dir = TempDir::new("batch-refused");
+    let (mut engine, ids) = engine_with_four_pages(&dir);
+    let before = engine.view();
+    let pages = engine.session().file().pages.clone();
+    for command in [
+        Command::PageRotateMany { pages: vec![ids[0], PageId(9999)], quarter_turns: 1 },
+        Command::PageDeleteMany { pages: vec![PageId(9999), ids[1]] },
+        Command::PageSetLookMany { pages: vec![ids[0], PageId(9999)], look: Look::BlackWhite, strength: 50 },
+        Command::PageRotateMany { pages: vec![], quarter_turns: 1 },
+        Command::PageDeleteMany { pages: vec![] },
+    ] {
+        assert!(engine.dispatch(command.clone()).is_err(), "{command:?} was accepted");
+    }
+    assert_eq!(engine.session().file().pages, pages, "a refused batch changed a page");
+    assert_eq!(engine.view().tray, before.tray);
 }
 
 // ---- Screen 2 ----
@@ -226,13 +720,18 @@ fn a_drag_is_one_undo_step_and_a_pause_starts_a_new_one() {
     }
     engine.dispatch(Command::EditUndo).unwrap();
     assert_eq!(without_redo(engine.view()), start);
-    // The import is a step of its own: undoing it takes the photo away, and redoing brings it back.
+    // Opening Crop and the import are steps of their own: undoing them takes the photo away, and
+    // redoing brings it back (it is read again, and its page joins again).
     assert!(engine.view().can_undo);
+    engine.dispatch(Command::EditUndo).unwrap();
+    assert!(matches!(engine.view().screen, Screen::Enhance(_)));
     engine.dispatch(Command::EditUndo).unwrap();
     assert!(engine.session().file().photos.is_empty());
     assert_eq!(engine.view().screen, Screen::Import);
     engine.dispatch(Command::EditRedo).unwrap();
     assert_eq!(engine.session().file().photos.len(), 1);
+    settle(&mut engine);
+    engine.dispatch(Command::EditRedo).unwrap();
     engine.dispatch(Command::EditRedo).unwrap();
     assert_eq!(engine.view().crop.unwrap().outlines[0].corners.0[2], Point::new(159.0, 90.0));
     // A pause longer than the window starts a new step.
@@ -302,22 +801,22 @@ fn book_spreads_cut_a_photo_into_two_pages_that_open_in_reading_order() {
     let crop = engine.view().crop.unwrap();
     assert_eq!(crop.outlines[0].corners.0[1], Point::new(90.0, 16.0));
     assert_eq!(crop.outlines[1].corners.0[3], Point::new(95.0, 104.0));
-    // Applying opens the left page; adding it opens the right page on the same look.
+    // Both halves are pages of the document the whole time, left then right, and Done opens the
+    // left one finished.
+    assert_eq!(engine.view().tray.len(), 2);
     engine.dispatch(Command::CropApply { photo }).unwrap();
     let Screen::Enhance(left) = engine.view().screen else { panic!("Screen 3 expected") };
     assert_eq!(engine.view().enhance.unwrap().half, Some(scancraft_core::recipe::Half::Left));
+    // Each page has a look of its own.
     engine.dispatch(Command::PageSetLook { page: left, look: Look::Grayscale }).unwrap();
-    assert!(engine.view().enhance.unwrap().more_to_come);
-    engine.dispatch(Command::PageAdd { page: left }).unwrap();
     let view = engine.view();
-    let enhance = view.enhance.unwrap();
-    assert_eq!(enhance.half, Some(scancraft_core::recipe::Half::Right));
-    assert_eq!(enhance.look, Look::Grayscale);
-    assert!(!enhance.more_to_come);
-    // Adding the second page ends the batch.
-    engine.dispatch(Command::PageAdd { page: enhance.page }).unwrap();
-    assert_eq!(engine.view().screen, Screen::Import);
-    assert_eq!(engine.view().tray.len(), 2);
+    assert_eq!(view.tray.len(), 2);
+    assert_eq!(view.tray[0].page, left);
+    assert!(view.tray.iter().all(|item| item.photo == photo));
+    let right = engine.session().file().pages[1].clone();
+    assert_eq!(right.spread.as_ref().map(|s| s.half), Some(scancraft_core::recipe::Half::Right));
+    assert_eq!(right.look, Look::ColorDocument);
+    assert_eq!(engine.session().page(left).unwrap().look, Look::Grayscale);
     settle(&mut engine);
 }
 
@@ -389,8 +888,7 @@ fn every_look_has_a_filter_thumbnail_and_a_tray_thumbnail_without_an_error() {
 fn an_image_that_cannot_be_made_is_reported_once_not_on_every_request() {
     let dir = TempDir::new("failing-image");
     let mut engine = engine_with_photo(&dir);
-    let page = to_screen_three(&mut engine);
-    engine.dispatch(Command::PageAdd { page }).unwrap();
+    let _ = to_screen_three(&mut engine);
     settle(&mut engine);
     engine.flush();
     drop(engine);
@@ -414,21 +912,23 @@ fn an_image_that_cannot_be_made_is_reported_once_not_on_every_request() {
 }
 
 #[test]
-fn a_file_is_imported_again_once_its_page_is_in_the_tray() {
+fn a_file_is_imported_again_once_it_has_been_read() {
     let dir = TempDir::new("reimport");
-    let mut engine = engine_with_photo(&dir);
-    let page = to_screen_three(&mut engine);
-    // While the photo waits to be corrected, importing it again makes no second photo.
-    let again = write(&dir, "desk0.png", &desk_png(0));
-    let _ = engine.dispatch(Command::ImportAdd { paths: vec![again.clone()] });
+    let mut engine = open(&dir, services(desk_quad()));
+    let path = write(&dir, "desk0.png", &desk_png(0));
+    engine.dispatch(Command::ImportAdd { paths: vec![path.clone()] }).unwrap();
+    // While the photo is being read, importing it again makes no second photo.
+    let error = engine.dispatch(Command::ImportAdd { paths: vec![path.clone()] }).unwrap_err();
+    assert!(error.contains("already being read"), "{error}");
     settle(&mut engine);
     assert_eq!(engine.session().file().photos.len(), 1);
-    // Once its page is added, the same file can come in again.
-    engine.dispatch(Command::PageAdd { page }).unwrap();
-    engine.dispatch(Command::ImportAdd { paths: vec![again] }).unwrap();
+    // Once it has been read, the same file can come in again: the user may want another scan of it.
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
     assert_eq!(engine.session().file().photos.len(), 2);
-    assert!(matches!(engine.view().screen, Screen::Crop(_)));
+    assert_eq!(engine.view().tray.len(), 2);
+    // The new page joined without taking the screen from the page that was open.
+    assert!(matches!(engine.view().screen, Screen::Enhance(_)));
 }
 
 #[test]
@@ -459,17 +959,14 @@ fn the_tray_adds_orders_edits_and_deletes_pages() {
     for seed in 0..3 {
         import_desk(&mut engine, &dir, seed);
     }
-    let mut ids = Vec::new();
-    for _ in 0..3 {
-        let page = to_screen_three(&mut engine);
-        engine.dispatch(Command::PageAdd { page }).unwrap();
-        ids.push(page);
-    }
-    assert_eq!(engine.view().screen, Screen::Import);
+    // The three pages joined the document by themselves, in the order of their photos.
     let tray = |e: &scancraft_engine::Engine| e.view().tray.iter().map(|t| t.page).collect::<Vec<_>>();
-    assert_eq!(tray(&engine), ids);
+    let ids = tray(&engine);
+    assert_eq!(ids.len(), 3);
+    let photos: Vec<_> = engine.session().file().photos.iter().map(|p| p.id).collect();
+    assert_eq!(engine.view().tray.iter().map(|t| t.photo).collect::<Vec<_>>(), photos);
     assert_eq!(engine.view().tray.iter().map(|t| t.number).collect::<Vec<_>>(), vec![1, 2, 3]);
-    assert!(engine.dispatch(Command::PageAdd { page: ids[0] }).is_err(), "a page is added once");
+    assert!(engine.dispatch(Command::PageAdd { page: ids[0] }).is_err(), "there is nothing to add");
     engine.dispatch(Command::PageMove { from: 2, to: 0 }).unwrap();
     assert_eq!(tray(&engine), vec![ids[2], ids[0], ids[1]]);
     assert!(engine.dispatch(Command::PageMove { from: 3, to: 0 }).is_err());
@@ -477,8 +974,11 @@ fn the_tray_adds_orders_edits_and_deletes_pages() {
     engine.dispatch(Command::PageEdit { page: ids[1] }).unwrap();
     assert_eq!(engine.view().screen, Screen::Enhance(ids[1]));
     engine.dispatch(Command::PageDelete { page: ids[1] }).unwrap();
-    assert_eq!(engine.view().screen, Screen::Import);
+    // The document still has pages, so the window is never empty: the page that was last shows.
+    assert_eq!(engine.view().screen, Screen::Enhance(ids[0]));
     assert_eq!(tray(&engine), vec![ids[2], ids[0]]);
+    // A photo with no page left goes with its page.
+    assert_eq!(engine.session().file().photos.len(), 2);
     engine.dispatch(Command::EditUndo).unwrap();
     assert_eq!(tray(&engine), vec![ids[2], ids[0], ids[1]]);
     assert!(engine.dispatch(Command::PageDelete { page: PageId(4242) }).is_err());
@@ -491,14 +991,18 @@ fn recognised_text_reaches_the_tray_and_a_stale_result_is_dropped() {
     let mut engine = engine_with_photo(&dir);
     let page = to_screen_three(&mut engine);
     engine.dispatch(Command::PageSetLook { page, look: Look::Original }).unwrap();
-    engine.dispatch(Command::PageAdd { page }).unwrap();
     settle(&mut engine);
     assert!(engine.view().tray[0].text_ready);
     let text = engine.session().file().pages[0].text.clone().unwrap();
     assert_eq!(text.engine, "fake");
-    // Turning the page throws the text away: its positions belonged to the old turn.
+    // Turning the page throws the text away, because its positions belonged to the old turn, and
+    // reads it again for the new one.
     engine.dispatch(Command::PageRotate { page, quarter_turns: 1 }).unwrap();
     assert!(!engine.view().tray[0].text_ready);
+    assert!(engine.view().reading_text.is_some(), "the view says the text is being read");
+    settle(&mut engine);
+    assert!(engine.view().tray[0].text_ready);
+    assert!(engine.view().reading_text.is_none());
 }
 
 // ---- images ----
@@ -570,7 +1074,6 @@ fn the_loupe_cuts_a_square_and_cuts_again_only_when_the_node_moves_a_quarter() {
 fn finish_one_page(engine: &mut scancraft_engine::Engine) -> PageId {
     let page = to_screen_three(engine);
     engine.dispatch(Command::PageSetLook { page, look: Look::Original }).unwrap();
-    engine.dispatch(Command::PageAdd { page }).unwrap();
     page
 }
 
@@ -582,21 +1085,32 @@ fn a_pdf_is_written_and_the_session_is_marked_exported() {
     let path = write(&dir, "flat.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
-    finish_one_page(&mut engine);
+    open_crop_on_first_page(&mut engine);
+    let page = finish_one_page(&mut engine);
     settle(&mut engine);
     let out = dir.join("Scan.pdf");
+    assert!(engine.view().last_export.is_none());
     engine.dispatch(Command::ExportPdf { path: out.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
-    assert_eq!(engine.view().screen, Screen::Export);
+    // The export is reported as progress, and the screen is not taken away from the page.
+    assert_eq!(engine.view().exporting, Some(scancraft_core::engine_api::Progress { done: 0, total: 1 }));
+    assert_eq!(engine.view().screen, Screen::Enhance(page));
     let notices = texts(&settle(&mut engine));
     let pdf = std::fs::read(&out).expect("the PDF exists");
     assert!(pdf.starts_with(b"%PDF-"), "{notices:?}");
     assert!(engine.session().file().exported);
     assert!(notices.iter().any(|n| n.starts_with("Exported 1 page")), "{notices:?}");
-    assert_eq!(engine.view().screen, Screen::Import);
+    assert_eq!(engine.view().screen, Screen::Enhance(page));
+    // What the export wrote is told in the view: where, how many pages, how big.
+    assert!(engine.view().exporting.is_none());
+    let summary = engine.view().last_export.expect("the export's summary");
+    assert_eq!(summary.pages, 1);
+    assert_eq!(summary.path, out.to_string_lossy());
+    assert_eq!(summary.bytes, pdf.len() as u64);
     // A PDF can be imported again: each page is a photo whose default is Use Full Image.
     let mut second = open_with(dir.path(), "Scan B", services(quad), 2);
     second.dispatch(Command::ImportAdd { paths: vec![out.to_string_lossy().into_owned()] }).unwrap();
     settle(&mut second);
+    open_crop_on_first_page(&mut second);
     let crop = second.view().crop.expect("the PDF's page is on Screen 2");
     assert!(matches!(crop.outlines[0].corners_from, CornerOrigin::FullImage));
     assert!(second.dispatch(Command::CropSetFlatten { page: crop.outlines[0].page, mode: FlattenMode::On }).is_err());
@@ -633,18 +1147,19 @@ fn a_pdf_gives_one_item_for_each_of_its_pages() {
     assert_eq!(photos[0].name, "two.pdf, page 1");
     assert_eq!(photos[1].name, "two.pdf, page 2");
     // A PDF page's default is Use Full Image, and flattening isn't offered for it.
+    open_crop_on_first_page(&mut engine);
     let crop = engine.view().crop.expect("Screen 2");
     assert!(matches!(crop.outlines[0].corners_from, CornerOrigin::FullImage));
 }
 
 #[test]
-fn exporting_from_screen_three_adds_the_page_being_looked_at_first() {
+fn a_page_is_exported_without_anything_being_added() {
     let dir = TempDir::new("export3");
     let mut engine = engine_with_photo(&dir);
     let page = to_screen_three(&mut engine);
     engine.dispatch(Command::PageSetLook { page, look: Look::Original }).unwrap();
-    // The page is still on Screen 3, not in the tray.
-    assert!(engine.view().tray.is_empty());
+    // The page was in the document before it was looked at.
+    assert_eq!(engine.view().tray.len(), 1);
     let out = dir.join("from3.pdf");
     engine.dispatch(Command::ExportPdf { path: out.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
     settle(&mut engine);
@@ -654,25 +1169,23 @@ fn exporting_from_screen_three_adds_the_page_being_looked_at_first() {
 }
 
 #[test]
-fn exporting_with_photos_not_added_asks_first_and_exporting_nothing_is_an_error() {
+fn exporting_nothing_is_an_error_and_so_is_exporting_while_a_photo_is_still_being_read() {
     let dir = TempDir::new("confirm");
-    let mut engine = open(&dir, services(desk_quad()));
+    let (gate, held) = std::sync::mpsc::channel();
+    let services =
+        Services { detector: Some(Arc::new(HeldDetector { quad: desk_quad(), gate: std::sync::Mutex::new(held) })), recognizer: None, upright: None };
+    let mut engine = open(&dir, services);
     let out = dir.join("two.pdf").to_string_lossy().into_owned();
     let export = |e: &mut scancraft_engine::Engine| e.dispatch(Command::ExportPdf { path: out.clone(), options: ExportOptions::default() });
-    import_desk(&mut engine, &dir, 0);
     assert!(export(&mut engine).unwrap_err().contains("no pages"));
-    import_desk(&mut engine, &dir, 1);
-    let first = to_screen_three(&mut engine);
-    engine.dispatch(Command::PageSetLook { page: first, look: Look::Original }).unwrap();
-    engine.dispatch(Command::PageAdd { page: first }).unwrap();
-    settle(&mut engine);
-    let question = export(&mut engine).unwrap_err();
-    assert_eq!(question, "1 photo hasn't been added. Export the 1 added page?");
+    let path = write(&dir, "desk.png", &desk_png(0));
+    engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
+    // The photo has no page yet and would be left out without a word: the export says to wait.
+    let error = export(&mut engine).unwrap_err();
+    assert!(error.contains("still being read"), "{error}");
     assert!(!dir.join("two.pdf").exists());
-    // Another command in between withdraws the question; asking again repeats it.
-    engine.dispatch(Command::PageEdit { page: first }).unwrap();
-    assert!(export(&mut engine).is_err());
-    // Asked and confirmed: the same call goes through.
+    gate.send(()).unwrap();
+    settle(&mut engine);
     export(&mut engine).unwrap();
     settle(&mut engine);
     assert!(dir.join("two.pdf").exists());
@@ -689,6 +1202,7 @@ fn a_pdf_does_not_depend_on_the_number_of_threads() {
         let path = write(&dir, "flat.png", &bytes);
         engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
         settle(&mut engine);
+        open_crop_on_first_page(&mut engine);
         let page = to_screen_three(&mut engine);
         for look in [Look::Original, Look::Grayscale, Look::BlackWhite] {
             engine.dispatch(Command::PageSetLook { page, look }).unwrap();
@@ -703,7 +1217,6 @@ fn a_pdf_does_not_depend_on_the_number_of_threads() {
             outputs.push(((threads, Some(look)), preview.data().iter().flatten().copied().collect::<Vec<u8>>()));
         }
         engine.dispatch(Command::PageSetLook { page, look: Look::Grayscale }).unwrap();
-        engine.dispatch(Command::PageAdd { page }).unwrap();
         settle(&mut engine);
         let out = dir.join("t.pdf");
         engine.dispatch(Command::ExportPdf { path: out.to_string_lossy().into_owned(), options: ExportOptions::default() }).unwrap();
@@ -784,6 +1297,19 @@ fn a_new_session_starts_empty_in_its_own_folder_and_keeps_the_old_one() {
 }
 
 #[test]
+fn a_new_scans_folder_is_used_by_the_next_new_scan() {
+    let dir = TempDir::new("scans-folder");
+    let elsewhere = TempDir::new("scans-folder-elsewhere");
+    let mut engine = engine_with_photo(&dir);
+    let chosen = elsewhere.path().to_string_lossy().into_owned();
+    engine.set_settings(|s| s.sessions_dir = Some(chosen));
+    engine.dispatch(Command::SessionNew).unwrap();
+    assert_eq!(engine.session_dir().parent(), Some(elsewhere.path()), "the new scan is not in the folder that was chosen");
+    // The scan that was open stays where it was.
+    assert!(dir.path().join("Scan A").join("session.json").is_file());
+}
+
+#[test]
 fn book_spreads_stays_on_for_the_next_session() {
     let dir = TempDir::new("bookdefault");
     let mut engine = engine_with_photo(&dir);
@@ -804,7 +1330,7 @@ fn the_session_is_written_at_most_once_a_second() {
     engine.save_now().unwrap();
     let (session, pending) = (engine.session_dir().join("session.json"), engine.session_dir().join("pending.json"));
     let (_, page) = current(&engine);
-    // The page being worked on lives in pending.json until it is added to the tray.
+    // Every page is in session.json: there is no pending.json any more.
     let on_disk = || (std::fs::read(&session).unwrap(), std::fs::read(&pending).unwrap_or_default());
     let saved = on_disk();
     clock.store(10_400, Ordering::Relaxed);
@@ -827,6 +1353,7 @@ fn back_to_crop_opens_the_corners_screen_with_the_pages_corners() {
     let path = write(&dir, "flat.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo, page) = current(&engine);
     engine.dispatch(Command::CropApply { photo }).unwrap();
     assert!(matches!(engine.view().screen, Screen::Enhance(_)));
@@ -849,6 +1376,7 @@ fn labelled_setup(dir: &TempDir, set: &TempDir) -> (scancraft_engine::Engine, Pa
     let path = write(set, "flat.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo, page) = current(&engine);
     engine.dispatch(Command::CropApply { photo }).unwrap();
     settle(&mut engine);
@@ -958,6 +1486,7 @@ fn a_page_of_a_pdf_is_not_labelled() {
     let mut engine = open(&dir, services(desk_quad()));
     engine.dispatch(Command::ImportAdd { paths: vec![path.to_string_lossy().into_owned()] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (_, page) = current(&engine);
     let folder = set.path().to_string_lossy().into_owned();
     let error = engine.dispatch(Command::ReferenceLabel { page, folder, category: "receipt".to_string() }).unwrap_err();
@@ -977,6 +1506,7 @@ fn a_book_spread_is_labelled_with_the_whole_spread_and_its_spine() {
     let path = write(&set, "spread.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo, _) = current(&engine);
     engine.dispatch(Command::CropBook { on: true }).unwrap();
     engine.dispatch(Command::CropSetSpine { photo, top: Point::new(430.0, 70.0), bottom: Point::new(450.0, 590.0) }).unwrap();
@@ -1028,6 +1558,7 @@ fn book_spreads_put_the_cut_on_the_spine_a30_finds() {
     let path = write(&set, "spread.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     engine.dispatch(Command::CropBook { on: true }).unwrap();
     settle(&mut engine);
     let crop = engine.view().crop.unwrap();
@@ -1053,6 +1584,7 @@ fn a_spine_the_user_moved_is_not_moved_back_by_a30() {
     let path = write(&set, "spread.png", &bytes);
     engine.dispatch(Command::ImportAdd { paths: vec![path] }).unwrap();
     settle(&mut engine);
+    open_crop_on_first_page(&mut engine);
     let (photo, _) = current(&engine);
     engine.dispatch(Command::CropBook { on: true }).unwrap();
     engine.dispatch(Command::CropSetSpine { photo, top: Point::new(430.0, 70.0), bottom: Point::new(450.0, 590.0) }).unwrap();

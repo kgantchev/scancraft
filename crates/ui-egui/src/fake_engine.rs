@@ -24,6 +24,10 @@ pub fn empty_view() -> ViewState {
         busy: false,
         notices: Vec::new(),
         restore_offer: None,
+        importing: None,
+        reading_text: None,
+        exporting: None,
+        last_export: None,
     }
 }
 
@@ -35,6 +39,7 @@ pub struct FakeEngine {
     images: Vec<(ImageKey, Arc<Rgb8>)>,
     loupe: Option<LoupeCrop>,
     loupe_requests: Vec<(PhotoId, Point, f64)>,
+    image_requests: Vec<ImageKey>,
     poll_result: bool,
     /// The error every command gets, when the test wants one.
     error: Option<String>,
@@ -48,6 +53,7 @@ impl Default for FakeEngine {
             images: Vec::new(),
             loupe: None,
             loupe_requests: Vec::new(),
+            image_requests: Vec::new(),
             poll_result: false,
             error: None,
         }
@@ -85,6 +91,7 @@ impl FakeEngine {
     pub fn clear(&mut self) {
         self.dispatched.clear();
         self.loupe_requests.clear();
+        self.image_requests.clear();
     }
 
     /// Shows another view.
@@ -100,6 +107,11 @@ impl FakeEngine {
     /// What the interface asked the engine for a loupe crop: the photo, the centre and the side.
     pub fn loupe_requests(&self) -> &[(PhotoId, Point, f64)] {
         &self.loupe_requests
+    }
+
+    /// Every image the interface asked for, in order, since the last [`FakeEngine::clear`].
+    pub fn image_requests(&self) -> &[ImageKey] {
+        &self.image_requests
     }
 
     /// Makes every command fail with `error`.
@@ -126,6 +138,7 @@ impl EngineApi for FakeEngine {
     }
 
     fn image(&mut self, key: ImageKey) -> Option<Arc<Rgb8>> {
+        self.image_requests.push(key);
         self.images.iter().find(|(k, _)| *k == key).map(|(_, image)| image.clone())
     }
 

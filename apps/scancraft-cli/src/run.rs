@@ -7,7 +7,7 @@
 use crate::batch::{Flags, parse_flags, usage};
 use craft_settings::Location;
 use scancraft_core::command::Command;
-use scancraft_core::engine_api::{EngineApi, Screen};
+use scancraft_core::engine_api::EngineApi;
 use scancraft_core::image::Rgb8;
 use scancraft_core::recipe::{ExportOptions, FlattenMode, Look, Page, PageOrder, Quality};
 use scancraft_engine::cache::Cache;
@@ -27,8 +27,6 @@ const PDF_USAGE: &str = "usage: scancraft-cli pdf <photo>... [--look ..] [--stre
 
 /// The longest one run waits for the engine's jobs.
 const SETTLE_LIMIT: Duration = Duration::from_secs(1800);
-/// Screens a run may step through: a page and a photo each take two, so this is more than any session needs.
-const MAX_STEPS: usize = 4 * 500 + 8;
 
 /// An engine with a session folder of its own.
 struct Run {
@@ -166,6 +164,10 @@ fn analyse(path: &str, order: PageOrder, book: bool, mode: FlattenMode, flatten:
     run.engine.dispatch(Command::ImportAdd { paths: vec![path.to_string()] })?;
     let mut notes = settle(&mut run.engine)?;
     let detect_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // The page joined the document by itself; Crop shows the outline detection found.
+    if let Some(item) = run.engine.view().tray.first() {
+        run.engine.dispatch(Command::PageOpenCrop { page: item.page })?;
+    }
     let view = run.engine.view();
     let Some(crop) = view.crop else {
         return Err(format!("{path}: {}", notes.pop().unwrap_or_else(|| "the file could not be imported".to_string())));
@@ -202,7 +204,7 @@ fn analyse(path: &str, order: PageOrder, book: bool, mode: FlattenMode, flatten:
         notes.extend(settle(&mut run.engine)?);
         let flatten_ms = t.elapsed().as_secs_f64() * 1000.0;
         let session = run.engine.session();
-        let pages: Vec<&Page> = session.pending().iter().chain(session.file().pages.iter()).collect();
+        let pages: Vec<&Page> = session.file().pages.iter().collect();
         let decisions: Vec<Value> = pages
             .iter()
             .map(|p| match &p.sheet {
@@ -268,34 +270,25 @@ fn build_session(
     let mut run = open_run(services(), order, book, threads)?;
     run.engine.dispatch(Command::ImportAdd { paths: paths.to_vec() })?;
     settle(&mut run.engine)?;
-    // Screen 2 opens on whichever photo was found first, which depends on the threads. The pages
-    // must come out in the order of the command line, so the run starts at the first photo.
-    let first = run.engine.session().file().photos.first().map(|p| p.id);
-    let first_page = first.and_then(|photo| run.engine.session().pending().iter().find(|p| p.photo == photo).map(|p| p.id));
-    if let Some(page) = first_page {
+    // Every photo's page joined the document by itself, in the order of the photos whichever was
+    // read first, so the pages come out in the order of the command line however many threads
+    // there are. Each photo is cropped again with the recipe's flatten mode.
+    let photos: Vec<_> = run.engine.session().file().photos.iter().map(|p| p.id).collect();
+    for photo in photos {
+        let Some(page) = run.engine.session().pages_of(photo).first().map(|p| p.id) else { continue };
         run.engine.dispatch(Command::PageOpenCrop { page })?;
-    }
-    for _ in 0..MAX_STEPS {
-        match run.engine.view().screen {
-            Screen::Crop(photo) => {
-                if let Some(crop) = run.engine.view().crop {
-                    for o in &crop.outlines {
-                        run.engine.dispatch(Command::CropSetFlatten { page: o.page, mode })?;
-                    }
-                }
-                run.engine.dispatch(Command::CropApply { photo })?;
-                settle(&mut run.engine)?;
+        if let Some(crop) = run.engine.view().crop {
+            for o in &crop.outlines {
+                run.engine.dispatch(Command::CropSetFlatten { page: o.page, mode })?;
             }
-            Screen::Enhance(page) => {
-                run.engine.dispatch(Command::PageSetLook { page, look })?;
-                if let Some(value) = strength {
-                    run.engine.dispatch(Command::PageSetStrength { page, value })?;
-                }
-                run.engine.dispatch(Command::PageAdd { page })?;
-                settle(&mut run.engine)?;
-            }
-            _ => break,
+            run.engine.dispatch(Command::CropApply { photo })?;
+            settle(&mut run.engine)?;
         }
+    }
+    if !run.engine.session().file().pages.is_empty() {
+        let value = strength.unwrap_or_else(|| look.default_strength().unwrap_or(0));
+        run.engine.dispatch(Command::PageSetLookAll { look, strength: value })?;
+        settle(&mut run.engine)?;
     }
     if run.engine.session().file().pages.is_empty() {
         return Err("no page came out of the photos".to_string());

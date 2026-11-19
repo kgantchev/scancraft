@@ -1,8 +1,8 @@
 //! The snapshot the interface draws from (§6.3): built from the session on every `view()` call.
 
-use crate::crop::invalid_reason;
+use crate::crop::{invalid_reason, review_reason};
 use crate::{Engine, PhotoStatus};
-use scancraft_core::engine_api::{CropView, EnhanceView, OutlineView, Screen, TrayItem, ViewState};
+use scancraft_core::engine_api::{CropView, EnhanceView, OutlineView, PageState, Progress, Screen, TrayItem, ViewState};
 use scancraft_core::geom::Point;
 use scancraft_core::recipe::{CornerOrigin, Page, PhotoId, TurnOrigin};
 use scancraft_geom::sheet::unroll;
@@ -23,35 +23,76 @@ impl Engine {
                 Screen::Enhance(page) => self.enhance_view(page),
                 _ => None,
             },
-            tray: file.pages.iter().enumerate().map(|(i, p)| TrayItem { page: p.id, number: i as u32 + 1, text_ready: p.text.is_some() }).collect(),
+            tray: file
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| TrayItem { page: p.id, photo: p.photo, number: i as u32 + 1, text_ready: p.text.is_some(), state: self.page_state(p) })
+                .collect(),
             book_spreads: file.book_spreads,
             can_undo: self.undo.can_undo(),
             can_redo: self.undo.can_redo(),
-            busy: self.jobs.pending() > 0,
+            busy: self.jobs.unclaimed() > 0,
             notices: self.visible_notices.clone(),
             restore_offer: self.restore_offer,
+            importing: self.importing(),
+            reading_text: self.reading_text(),
+            exporting: self.exporting.then(|| Progress {
+                done: self.export_done.load(std::sync::atomic::Ordering::Relaxed).min(self.export_total),
+                total: self.export_total,
+            }),
+            last_export: self.last_export.clone(),
         }
+    }
+
+    /// Where a page is in its life: failed, still being prepared, flagged for a look, or ready.
+    fn page_state(&self, page: &Page) -> PageState {
+        if let Some(why) = self.page_failures.get(&page.id) {
+            return PageState::Failed(why.clone());
+        }
+        if self.page_busy(page.id) {
+            return PageState::Preparing;
+        }
+        if !self.reviewed.contains(&page.id)
+            && let Some(reason) = review_reason(page)
+        {
+            return PageState::NeedsLook(reason);
+        }
+        PageState::Ready
+    }
+
+    /// The photos the import now running has read, of those it added; `None` when none is running.
+    fn importing(&self) -> Option<Progress> {
+        let waiting = self.status.values().filter(|s| **s == PhotoStatus::Pending).count() as u32;
+        (waiting > 0).then(|| {
+            let total = self.batch_total.max(waiting);
+            Progress { done: total - waiting, total }
+        })
+    }
+
+    /// The pages whose text is being read, of those in the document; `None` when all have it.
+    fn reading_text(&self) -> Option<Progress> {
+        let pages = &self.session.file().pages;
+        let reading = pages.iter().filter(|p| self.reading_text_of(p.id)).count() as u32;
+        (reading > 0).then(|| {
+            let total = pages.len() as u32;
+            Progress { done: total.saturating_sub(reading), total }
+        })
     }
 
     fn crop_view(&self, photo: PhotoId) -> Option<CropView> {
         let file = self.session.file();
         let index = file.photos.iter().position(|p| p.id == photo)?;
         let item = file.photos.get(index)?;
-        let pages: Vec<&Page> = self.session.pending().iter().filter(|p| p.photo == photo).collect();
+        let pages: Vec<&Page> = self.session.pages_of(photo);
         let outlines: Vec<OutlineView> = pages.iter().map(|p| self.outline(p)).collect();
         let first = pages.first();
         let photos = file
             .photos
             .iter()
             .map(|p| {
-                let pending = self.session.pending().iter().find(|q| q.photo == p.id);
-                let added = self.session.file().pages.iter().find(|q| q.photo == p.id);
-                scancraft_core::engine_api::PhotoTab {
-                    photo: p.id,
-                    page: pending.or(added).map(|q| q.id),
-                    name: p.name.clone(),
-                    added: pending.is_none() && added.is_some(),
-                }
+                let page = self.session.pages_of(p.id).first().map(|q| q.id);
+                scancraft_core::engine_api::PhotoTab { photo: p.id, page, name: p.name.clone(), added: page.is_some() }
             })
             .collect();
         Some(CropView {
@@ -103,7 +144,6 @@ impl Engine {
             }
             _ => false,
         };
-        let others = self.session.pending().iter().any(|p| p.id != id);
         let detecting = self.status.values().any(|s| *s == PhotoStatus::Pending);
         Some(EnhanceView {
             page: id,
@@ -114,7 +154,7 @@ impl Engine {
             flattened_automatically,
             half: page.spread.as_ref().map(|s| s.half),
             low_resolution,
-            more_to_come: others || detecting,
+            more_to_come: detecting,
         })
     }
 }
