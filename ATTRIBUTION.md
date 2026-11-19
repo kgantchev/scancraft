@@ -6,6 +6,8 @@ Every asset in this repository, with its author, source and licence.
 |---|---|---|---|
 | `fixtures/flat.png`, `fixtures/curved.png`, `fixtures/spread.png` and their `.json` truth files | ScanCraft contributors | Drawn by `cargo xtask fixtures` | MIT OR Apache-2.0 |
 | `crates/io/src/helvetica.rs` (the standard Helvetica advance widths, data from the published Core 14 metrics) | ArtCraft Team and the PdfCraft contributors | PdfCraft `crates/fonts/src/std14_metrics.rs`, commit c944f106dd63eb9a33c7348eed1f03548cbd6468 | MIT OR Apache-2.0 |
+| `docs/screenshots/00-photos.jpg` (three photos of documents on desks: a letter, a recipe page and a receipt) | ScanCraft maintainers | Drawn by a script: the documents' text is original, set in Ubuntu Light (Ubuntu-font-1.0) and Hack (MIT) from `epaint_default_fonts`, then given perspective, curl, uneven light, shadow and noise | MIT OR Apache-2.0 |
+| `docs/screenshots/01-drop.png` to `06-export.png` (the README's screenshots) | ScanCraft maintainers | Rendered from the ScanCraft app, with the real engine and Apple's Vision services, scanning the three photos above; the interface text is set in egui's default fonts | MIT OR Apache-2.0 |
 | `apps/scancraft/assets/scancraft.svg`, `scancraft-1024.png`, `scancraft-256.png`, `ScanCraft.icns` (the app icon) | ScanCraft maintainers, generated with Google Gemini under a paid subscription | Generated as `scancraft.jpeg` (specification §12.1 item 5), then vectorised to the SVG; the PNGs and the `.icns` are rendered from the SVG | MIT OR Apache-2.0, as the maintainers' licence for the generated output |
 
 ## Datasets the tests read
